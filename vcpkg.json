@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "simplepowerattack",
+  "version-string": "1.0.0",
+  "port-version": 0,
+  "description": "A SKSE plugin that binds power attack to a simple configurable alternate key.",
+  "homepage": "https://www.skyrimng.com",
+  "license": "Apache-2.0",
+  "dependencies": [
+    "directxmath",
+    "directxtk",
+    "fmt",
+    "rapidcsv",
+    "simpleini",
+    "spdlog",
+    "xbyak"
+  ]
+}
