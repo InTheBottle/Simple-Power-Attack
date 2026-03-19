@@ -61,6 +61,7 @@ namespace {
 
     const TaskInterface* g_task = nullptr;
     BGSAction* g_rightPowerAttackAction = nullptr;
+    BGSAction* g_dualPowerAttackAction = nullptr;
     std::atomic<uint32_t> g_altPowerAttackKey = kDefaultAltPowerAttackKey;
     uint32_t g_pendingAltPowerAttackKey = kDefaultAltPowerAttackKey;
     bool g_hasUnsavedKeyChange = false;
@@ -71,7 +72,7 @@ namespace {
     REL::Relocation<Setting*> g_initialPowerAttackDelay{ RELOCATION_ID(509496, 381954) };
 
     void LoadConfig();
-    void TriggerRightPowerAttack(PlayerCharacter* player);
+    void TriggerPowerAttack(PlayerCharacter* player);
 
     std::string GetPrimaryConfigPath()
     {
@@ -179,6 +180,20 @@ namespace {
         return true;
     }
 
+    bool IsDualWielding(PlayerCharacter* player)
+    {
+        auto* rightForm = player->GetEquippedObject(false);
+        auto* leftForm = player->GetEquippedObject(true);
+        if (!rightForm || !leftForm) return false;
+
+        auto* rightWeap = skyrim_cast<TESObjectWEAP*>(rightForm);
+        auto* leftWeap = skyrim_cast<TESObjectWEAP*>(leftForm);
+        if (!rightWeap || !leftWeap) return false;
+
+        return rightWeap->IsOneHandedSword() || rightWeap->IsOneHandedDagger() ||
+               rightWeap->IsOneHandedAxe() || rightWeap->IsOneHandedMace();
+    }
+
     bool IsGameplayInputAllowed()
     {
         auto* ui = UI::GetSingleton();
@@ -214,7 +229,7 @@ namespace {
         auto* player = PlayerCharacter::GetSingleton();
         if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
 
-        TriggerRightPowerAttack(player);
+        TriggerPowerAttack(player);
         return true;
     }
 
@@ -234,14 +249,18 @@ namespace {
         return false;
     }
 
-    void TriggerRightPowerAttack(PlayerCharacter* player)
+    void TriggerPowerAttack(PlayerCharacter* player)
     {
         if (!g_task || !g_rightPowerAttackAction || !player) return;
 
-        g_task->AddTask([player]() {
+        BGSAction* action = (g_dualPowerAttackAction && IsDualWielding(player))
+            ? g_dualPowerAttackAction
+            : g_rightPowerAttackAction;
+
+        g_task->AddTask([player, action]() {
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
-            data->action = g_rightPowerAttackAction;
+            data->action = action;
 
             using ProcessAction_t = bool (*)(TESActionData*);
             REL::Relocation<ProcessAction_t> processAction{ RELOCATION_ID(40551, 41557) };
@@ -486,6 +505,11 @@ SKSEPluginLoad(const LoadInterface* skse)
         if (!g_rightPowerAttackAction) {
             SKSE::log::critical("Failed to resolve ActionRightPowerAttack (0x13383).");
             return;
+        }
+
+        g_dualPowerAttackAction = TESForm::LookupByID<BGSAction>(0x2E2F7);
+        if (!g_dualPowerAttackAction) {
+            SKSE::log::warn("Failed to resolve ActionDualPowerAttack (0x2E2F7). Dual power attacks disabled.");
         }
 
         if (!SKSEMenuFramework::IsInstalled()) {
