@@ -18,6 +18,7 @@ namespace {
     };
 
     constexpr uint32_t kDefaultAltPowerAttackKey = 257;  // Mouse Right
+    constexpr uint32_t kDefaultAltLeftPowerAttackKey = 259;  // Mouse Button 4
 
     constexpr uint32_t kMacroNumKeyboardKeys = 256;
     constexpr uint32_t kMacroNumMouseButtons = 8;
@@ -61,10 +62,14 @@ namespace {
 
     const TaskInterface* g_task = nullptr;
     BGSAction* g_rightPowerAttackAction = nullptr;
+    BGSAction* g_leftPowerAttackAction = nullptr;
     BGSAction* g_dualPowerAttackAction = nullptr;
     std::atomic<uint32_t> g_altPowerAttackKey = kDefaultAltPowerAttackKey;
     uint32_t g_pendingAltPowerAttackKey = kDefaultAltPowerAttackKey;
     bool g_hasUnsavedKeyChange = false;
+    std::atomic<uint32_t> g_altLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
+    uint32_t g_pendingAltLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
+    bool g_hasUnsavedLeftKeyChange = false;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
     BSTEventSink<InputEvents>* g_rawInputSink = nullptr;
@@ -73,6 +78,7 @@ namespace {
 
     void LoadConfig();
     void TriggerPowerAttack(PlayerCharacter* player);
+    void TriggerLeftPowerAttack(PlayerCharacter* player);
 
     std::string GetPrimaryConfigPath()
     {
@@ -194,6 +200,19 @@ namespace {
                rightWeap->IsOneHandedAxe() || rightWeap->IsOneHandedMace();
     }
 
+    bool IsLeftHandValidForPowerAttack(PlayerCharacter* player)
+    {
+        TESForm* leftObj = player->GetEquippedObject(true);
+        if (!leftObj) return false;
+
+        auto* weap = skyrim_cast<TESObjectWEAP*>(leftObj);
+        if (!weap) return false;
+
+        if (weap->IsBow() || weap->IsStaff() || weap->IsCrossbow()) return false;
+
+        return true;
+    }
+
     bool IsGameplayInputAllowed()
     {
         auto* ui = UI::GetSingleton();
@@ -224,13 +243,24 @@ namespace {
         }
 
         const uint32_t keyCode = ToMacroKeyCode(button);
-        if (keyCode != g_altPowerAttackKey.load()) return false;
+        const bool isRightKey = keyCode == g_altPowerAttackKey.load();
+        const bool isLeftKey = keyCode == g_altLeftPowerAttackKey.load();
+        if (!isRightKey && !isLeftKey) return false;
 
         auto* player = PlayerCharacter::GetSingleton();
         if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
 
-        TriggerPowerAttack(player);
-        return true;
+        if (isRightKey) {
+            TriggerPowerAttack(player);
+            return true;
+        }
+
+        if (isLeftKey && IsLeftHandValidForPowerAttack(player)) {
+            TriggerLeftPowerAttack(player);
+            return true;
+        }
+
+        return false;
     }
 
     bool ProcessInputChain(RE::InputEvent* events)
@@ -268,6 +298,21 @@ namespace {
         });
     }
 
+    void TriggerLeftPowerAttack(PlayerCharacter* player)
+    {
+        if (!g_task || !g_leftPowerAttackAction || !player) return;
+
+        g_task->AddTask([player, action = g_leftPowerAttackAction]() {
+            std::unique_ptr<TESActionData> data(TESActionData::Create());
+            data->source = NiPointer<TESObjectREFR>(player);
+            data->action = action;
+
+            using ProcessAction_t = bool (*)(TESActionData*);
+            REL::Relocation<ProcessAction_t> processAction{ RELOCATION_ID(40551, 41557) };
+            processAction(data.get());
+        });
+    }
+
     uint32_t SanitizeKeyCode(uint32_t keyCode)
     {
         if (keyCode == 0 || keyCode >= kMaxMacros) {
@@ -276,13 +321,15 @@ namespace {
         return keyCode;
     }
 
-    bool SaveConfig(uint32_t keyCode)
+    bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode)
     {
         keyCode = SanitizeKeyCode(keyCode);
+        leftKeyCode = SanitizeKeyCode(leftKeyCode);
         const std::string savePath = GetPrimaryConfigPath();
 
         g_ini.Reset();
         g_ini.SetLongValue("General", "iKeycode", static_cast<long>(keyCode));
+        g_ini.SetLongValue("General", "iLeftKeycode", static_cast<long>(leftKeyCode));
 
         try {
             std::filesystem::path savePathFs(savePath);
@@ -301,7 +348,7 @@ namespace {
             return false;
         }
 
-        SKSE::log::info("Saved keycode {} to '{}'", keyCode, savePath);
+        SKSE::log::info("Saved keycodes right={} left={} to '{}'", keyCode, leftKeyCode, savePath);
         return true;
     }
 
@@ -341,22 +388,34 @@ namespace {
     {
         const uint32_t currentCode = g_altPowerAttackKey.load();
         const uint32_t pendingCode = g_pendingAltPowerAttackKey;
+        const uint32_t currentLeftCode = g_altLeftPowerAttackKey.load();
+        const uint32_t pendingLeftCode = g_pendingAltLeftPowerAttackKey;
 
         ImGuiMCP::Text("Simple Power Attack");
         ImGuiMCP::Separator();
-        ImGuiMCP::Text("Active key code: %u", currentCode);
-        ImGuiMCP::Text("Selected key code: %u", pendingCode);
+        ImGuiMCP::Text("Right power attack key: %u (pending: %u)", currentCode, pendingCode);
+        ImGuiMCP::Text("Left power attack key: %u (pending: %u)", currentLeftCode, pendingLeftCode);
         ImGuiMCP::TextWrapped("Vanilla long-press power attack is disabled by this plugin.");
 
         uint32_t chosenCode = pendingCode;
+        uint32_t chosenLeftCode = pendingLeftCode;
         bool changed = false;
+        bool leftChanged = false;
 
-        if (ImGuiMCP::CollapsingHeader("Mouse Keys", 0)) {
-            changed = DrawKeyOptionCombo("Mouse binding", kMouseOptions, pendingCode, chosenCode) || changed;
+        if (ImGuiMCP::CollapsingHeader("Right Power Attack - Mouse Keys", 0)) {
+            changed = DrawKeyOptionCombo("Right mouse binding", kMouseOptions, pendingCode, chosenCode) || changed;
         }
 
-        if (ImGuiMCP::CollapsingHeader("Gamepad Keys", 0)) {
-            changed = DrawKeyOptionCombo("Gamepad binding", kGamepadOptions, pendingCode, chosenCode) || changed;
+        if (ImGuiMCP::CollapsingHeader("Right Power Attack - Gamepad Keys", 0)) {
+            changed = DrawKeyOptionCombo("Right gamepad binding", kGamepadOptions, pendingCode, chosenCode) || changed;
+        }
+
+        if (ImGuiMCP::CollapsingHeader("Left Power Attack - Mouse Keys", 0)) {
+            leftChanged = DrawKeyOptionCombo("Left mouse binding", kMouseOptions, pendingLeftCode, chosenLeftCode) || leftChanged;
+        }
+
+        if (ImGuiMCP::CollapsingHeader("Left Power Attack - Gamepad Keys", 0)) {
+            leftChanged = DrawKeyOptionCombo("Left gamepad binding", kGamepadOptions, pendingLeftCode, chosenLeftCode) || leftChanged;
         }
 
         if (changed) {
@@ -364,22 +423,33 @@ namespace {
             g_hasUnsavedKeyChange = (g_pendingAltPowerAttackKey != currentCode);
         }
 
-        if (g_hasUnsavedKeyChange) {
+        if (leftChanged) {
+            g_pendingAltLeftPowerAttackKey = SanitizeKeyCode(chosenLeftCode);
+            g_hasUnsavedLeftKeyChange = (g_pendingAltLeftPowerAttackKey != currentLeftCode);
+        }
+
+        if (g_hasUnsavedKeyChange || g_hasUnsavedLeftKeyChange) {
             ImGuiMCP::TextWrapped("Unsaved key selection. Click Save to write to INI and apply.");
         }
 
         if (ImGuiMCP::Button("Save to INI")) {
             const uint32_t saveCode = SanitizeKeyCode(g_pendingAltPowerAttackKey);
-            if (SaveConfig(saveCode)) {
+            const uint32_t saveLeftCode = SanitizeKeyCode(g_pendingAltLeftPowerAttackKey);
+            if (SaveConfig(saveCode, saveLeftCode)) {
                 g_altPowerAttackKey = saveCode;
                 g_pendingAltPowerAttackKey = saveCode;
                 g_hasUnsavedKeyChange = false;
+                g_altLeftPowerAttackKey = saveLeftCode;
+                g_pendingAltLeftPowerAttackKey = saveLeftCode;
+                g_hasUnsavedLeftKeyChange = false;
             }
         }
 
         if (ImGuiMCP::Button("Discard Unsaved Changes")) {
             g_pendingAltPowerAttackKey = currentCode;
             g_hasUnsavedKeyChange = false;
+            g_pendingAltLeftPowerAttackKey = currentLeftCode;
+            g_hasUnsavedLeftKeyChange = false;
         }
 
         if (ImGuiMCP::Button("Reload from INI")) {
@@ -398,10 +468,13 @@ namespace {
 
         const SI_Error result = g_ini.LoadFile(path.c_str());
         if (result < 0) {
-            SKSE::log::warn("Config not found at '{}', using default key {}", path, kDefaultAltPowerAttackKey);
+            SKSE::log::warn("Config not found at '{}', using defaults right={} left={}", path, kDefaultAltPowerAttackKey, kDefaultAltLeftPowerAttackKey);
             g_altPowerAttackKey = kDefaultAltPowerAttackKey;
             g_pendingAltPowerAttackKey = kDefaultAltPowerAttackKey;
             g_hasUnsavedKeyChange = false;
+            g_altLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
+            g_pendingAltLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
+            g_hasUnsavedLeftKeyChange = false;
             g_ini.Reset();
             return;
         }
@@ -409,11 +482,17 @@ namespace {
         const long rawValue = g_ini.GetLongValue("General", "iKeycode", static_cast<long>(kDefaultAltPowerAttackKey));
         uint32_t parsedKey = SanitizeKeyCode(static_cast<uint32_t>(rawValue < 0 ? 0 : rawValue));
 
+        const long rawLeftValue = g_ini.GetLongValue("General", "iLeftKeycode", static_cast<long>(kDefaultAltLeftPowerAttackKey));
+        uint32_t parsedLeftKey = SanitizeKeyCode(static_cast<uint32_t>(rawLeftValue < 0 ? 0 : rawLeftValue));
+
         g_altPowerAttackKey = parsedKey;
         g_pendingAltPowerAttackKey = parsedKey;
         g_hasUnsavedKeyChange = false;
+        g_altLeftPowerAttackKey = parsedLeftKey;
+        g_pendingAltLeftPowerAttackKey = parsedLeftKey;
+        g_hasUnsavedLeftKeyChange = false;
         g_ini.Reset();
-        SKSE::log::info("Loaded keycode {} from '{}'", parsedKey, path);
+        SKSE::log::info("Loaded keycodes right={} left={} from '{}'", parsedKey, parsedLeftKey, path);
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
@@ -441,6 +520,10 @@ namespace {
             if (g_hasUnsavedKeyChange) {
                 g_pendingAltPowerAttackKey = g_altPowerAttackKey.load();
                 g_hasUnsavedKeyChange = false;
+            }
+            if (g_hasUnsavedLeftKeyChange) {
+                g_pendingAltLeftPowerAttackKey = g_altLeftPowerAttackKey.load();
+                g_hasUnsavedLeftKeyChange = false;
             }
         }
     }
@@ -507,6 +590,11 @@ SKSEPluginLoad(const LoadInterface* skse)
             return;
         }
 
+        g_leftPowerAttackAction = TESForm::LookupByID<BGSAction>(0x02E2F6);
+        if (!g_leftPowerAttackAction) {
+            SKSE::log::warn("Failed to resolve ActionLeftPowerAttack (0x02E2F6). Left power attacks disabled.");
+        }
+
         g_dualPowerAttackAction = TESForm::LookupByID<BGSAction>(0x2E2F7);
         if (!g_dualPowerAttackAction) {
             SKSE::log::warn("Failed to resolve ActionDualPowerAttack (0x2E2F7). Dual power attacks disabled.");
@@ -536,7 +624,7 @@ SKSEPluginLoad(const LoadInterface* skse)
             }
         }
 
-        SKSE::log::info("Initialized — keycode={}", g_altPowerAttackKey.load());
+        SKSE::log::info("Initialized — right keycode={}, left keycode={}", g_altPowerAttackKey.load(), g_altLeftPowerAttackKey.load());
     });
     return true;
 }
