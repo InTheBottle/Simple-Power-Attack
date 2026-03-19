@@ -1,13 +1,13 @@
 # Simple Power Attack
 
-Simple Power Attack is an SKSE plugin that maps right-hand power attack to a configurable alternate input key.
+Simple Power Attack is an SKSE plugin that maps power attacks to a configurable alternate input key.
 
 ## Features
 
 - Configurable alternate key for power attack
 - Mouse and gamepad key options through SKSE Menu Framework
 - INI-backed key persistence
-- Supports SE, AE, and VR runtime targeting via CommonLibSSE-NG
+- Supports SE, AE, and VR via CommonLibSSE-NG
 
 ## Requirements
 
