@@ -20,7 +20,7 @@ namespace {
     constexpr uint32_t kDefaultAltPowerAttackKey = 257;  // Mouse Right
     constexpr uint32_t kDefaultAltLeftPowerAttackKey = 259;  // Mouse Button 4
     constexpr uint32_t kKeyDisabled = 0;  // 0 = key disabled
-    constexpr uint32_t kModifierNone = 0;  // 0 = no modifier required
+    constexpr uint32_t kModifierNone = 0;  // 0 = no modifier 
 
     constexpr uint32_t kMacroNumKeyboardKeys = 256;
     constexpr uint32_t kMacroNumMouseButtons = 8;
@@ -93,6 +93,9 @@ namespace {
     std::atomic<uint32_t> g_leftModifierKey = kModifierNone;
     uint32_t g_pendingLeftModifierKey = kModifierNone;
     bool g_hasUnsavedLeftModChange = false;
+    std::atomic<bool> g_mcoMode = false;
+    bool g_pendingMcoMode = false;
+    bool g_hasUnsavedMcoChange = false;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
     BSTEventSink<InputEvents>* g_rawInputSink = nullptr;
@@ -320,12 +323,8 @@ namespace {
 
         const uint32_t keyCode = ToMacroKeyCode(button);
 
-        // Block key uses held/released tracking, check first
-        if (HandleBlockEvent(button, keyCode)) {
-            return true;
-        }
+        HandleBlockEvent(button, keyCode);
 
-        // Power attacks only trigger on initial press
         const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
         if (!isDown) {
             return false;
@@ -371,7 +370,7 @@ namespace {
     {
         if (!g_task || !g_rightPowerAttackAction || !player) return;
 
-        BGSAction* action = (g_dualPowerAttackAction && IsDualWielding(player))
+        BGSAction* action = (!g_mcoMode.load() && g_dualPowerAttackAction && IsDualWielding(player))
             ? g_dualPowerAttackAction
             : g_rightPowerAttackAction;
 
@@ -406,7 +405,7 @@ namespace {
         if (keyCode >= kMaxMacros) {
             return kKeyDisabled;
         }
-        return keyCode;  // 0 is valid (= disabled)
+        return keyCode;  
     }
 
     uint32_t SanitizeModifierKeyCode(uint32_t keyCode)
@@ -414,11 +413,11 @@ namespace {
         if (keyCode >= kMacroNumKeyboardKeys) {
             return kModifierNone;
         }
-        return keyCode;  // 0 = no modifier
+        return keyCode;  
     }
 
     bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t blockKeyCode,
-                     uint32_t rightMod, uint32_t leftMod)
+                     uint32_t rightMod, uint32_t leftMod, bool mcoMode)
     {
         keyCode = SanitizeKeyCode(keyCode);
         leftKeyCode = SanitizeKeyCode(leftKeyCode);
@@ -433,6 +432,7 @@ namespace {
         g_ini.SetLongValue("General", "iBlockKeycode", static_cast<long>(blockKeyCode));
         g_ini.SetLongValue("General", "iRightModifier", static_cast<long>(rightMod));
         g_ini.SetLongValue("General", "iLeftModifier", static_cast<long>(leftMod));
+        g_ini.SetBoolValue("MCO", "bMCOMode", mcoMode);
 
         try {
             std::filesystem::path savePathFs(savePath);
@@ -451,8 +451,8 @@ namespace {
             return false;
         }
 
-        SKSE::log::info("Saved config right={} left={} block={} rmod={} lmod={} to '{}'",
-            keyCode, leftKeyCode, blockKeyCode, rightMod, leftMod, savePath);
+        SKSE::log::info("Saved config right={} left={} block={} rmod={} lmod={} mco={} to '{}'",
+            keyCode, leftKeyCode, blockKeyCode, rightMod, leftMod, mcoMode, savePath);
         return true;
     }
 
@@ -501,6 +501,9 @@ namespace {
         const uint32_t currentLMod = g_leftModifierKey.load();
         const uint32_t pendingLMod = g_pendingLeftModifierKey;
 
+        const bool currentMco = g_mcoMode.load();
+        bool pendingMco = g_pendingMcoMode;
+
         ImGuiMCP::Text("Simple Power Attack");
         ImGuiMCP::Separator();
         ImGuiMCP::TextWrapped("Vanilla long-press power attack is disabled by this plugin.");
@@ -512,13 +515,14 @@ namespace {
         uint32_t chosenBlockCode = pendingBlockCode;
         uint32_t chosenRMod = pendingRMod;
         uint32_t chosenLMod = pendingLMod;
+        bool chosenMco = pendingMco;
         bool changed = false;
         bool leftChanged = false;
         bool blockChanged = false;
         bool rModChanged = false;
         bool lModChanged = false;
+        bool mcoChanged = false;
 
-        // --- Mouse / Keyboard Section ---
         if (ImGuiMCP::CollapsingHeader("Mouse / Keyboard", 0)) {
             ImGuiMCP::Text("Right Power Attack");
             changed = DrawKeyOptionCombo("Key##mk_right", kMouseOptions, pendingCode, chosenCode) || changed;
@@ -534,7 +538,13 @@ namespace {
             blockChanged = DrawKeyOptionCombo("Key##mk_block", kMouseOptions, pendingBlockCode, chosenBlockCode) || blockChanged;
         }
 
-        // --- Controller Section ---
+        if (ImGuiMCP::CollapsingHeader("MCO Compatibility", 0)) {
+            if (ImGuiMCP::Checkbox("MCO Mode (Dual Wield Fix)", &chosenMco)) {
+                mcoChanged = true;
+            }
+            ImGuiMCP::TextWrapped("Enable if using MCO (Modern Combat Overhaul). Fixes dual wield power attacks using vanilla animations instead of MCO animations.");
+        }
+
         if (ImGuiMCP::CollapsingHeader("Controller", 0)) {
             ImGuiMCP::Text("Right Power Attack");
             changed = DrawKeyOptionCombo("Button##gp_right", kGamepadOptions, pendingCode, chosenCode) || changed;
@@ -573,8 +583,14 @@ namespace {
             g_hasUnsavedLeftModChange = (g_pendingLeftModifierKey != currentLMod);
         }
 
+        if (mcoChanged) {
+            g_pendingMcoMode = chosenMco;
+            g_hasUnsavedMcoChange = (g_pendingMcoMode != currentMco);
+        }
+
         const bool hasUnsaved = g_hasUnsavedKeyChange || g_hasUnsavedLeftKeyChange ||
-            g_hasUnsavedBlockKeyChange || g_hasUnsavedRightModChange || g_hasUnsavedLeftModChange;
+            g_hasUnsavedBlockKeyChange || g_hasUnsavedRightModChange || g_hasUnsavedLeftModChange ||
+            g_hasUnsavedMcoChange;
 
         ImGuiMCP::Separator();
 
@@ -588,7 +604,8 @@ namespace {
             const uint32_t saveBlockCode = SanitizeKeyCode(g_pendingAltBlockKey);
             const uint32_t saveRMod = SanitizeModifierKeyCode(g_pendingRightModifierKey);
             const uint32_t saveLMod = SanitizeModifierKeyCode(g_pendingLeftModifierKey);
-            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveRMod, saveLMod)) {
+            const bool saveMco = g_pendingMcoMode;
+            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveRMod, saveLMod, saveMco)) {
                 g_altPowerAttackKey = saveCode;
                 g_pendingAltPowerAttackKey = saveCode;
                 g_hasUnsavedKeyChange = false;
@@ -604,6 +621,9 @@ namespace {
                 g_leftModifierKey = saveLMod;
                 g_pendingLeftModifierKey = saveLMod;
                 g_hasUnsavedLeftModChange = false;
+                g_mcoMode = saveMco;
+                g_pendingMcoMode = saveMco;
+                g_hasUnsavedMcoChange = false;
             }
         }
 
@@ -620,6 +640,8 @@ namespace {
             g_hasUnsavedRightModChange = false;
             g_pendingLeftModifierKey = currentLMod;
             g_hasUnsavedLeftModChange = false;
+            g_pendingMcoMode = currentMco;
+            g_hasUnsavedMcoChange = false;
         }
 
         ImGuiMCP::SameLine();
@@ -656,6 +678,9 @@ namespace {
             g_leftModifierKey = kModifierNone;
             g_pendingLeftModifierKey = kModifierNone;
             g_hasUnsavedLeftModChange = false;
+            g_mcoMode = false;
+            g_pendingMcoMode = false;
+            g_hasUnsavedMcoChange = false;
             g_ini.Reset();
             return;
         }
@@ -692,9 +717,15 @@ namespace {
         g_leftModifierKey = parsedLMod;
         g_pendingLeftModifierKey = parsedLMod;
         g_hasUnsavedLeftModChange = false;
+
+        const bool parsedMco = g_ini.GetBoolValue("MCO", "bMCOMode", false);
+        g_mcoMode = parsedMco;
+        g_pendingMcoMode = parsedMco;
+        g_hasUnsavedMcoChange = false;
+
         g_ini.Reset();
-        SKSE::log::info("Loaded config right={} left={} block={} rmod={} lmod={} from '{}'",
-            parsedKey, parsedLeftKey, parsedBlockKey, parsedRMod, parsedLMod, path);
+        SKSE::log::info("Loaded config right={} left={} block={} rmod={} lmod={} mco={} from '{}'",
+            parsedKey, parsedLeftKey, parsedBlockKey, parsedRMod, parsedLMod, parsedMco, path);
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
@@ -738,6 +769,10 @@ namespace {
             if (g_hasUnsavedLeftModChange) {
                 g_pendingLeftModifierKey = g_leftModifierKey.load();
                 g_hasUnsavedLeftModChange = false;
+            }
+            if (g_hasUnsavedMcoChange) {
+                g_pendingMcoMode = g_mcoMode.load();
+                g_hasUnsavedMcoChange = false;
             }
         }
     }
