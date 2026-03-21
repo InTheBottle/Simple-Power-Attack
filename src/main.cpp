@@ -240,15 +240,6 @@ namespace {
         return true;
     }
 
-    bool HasSpellInHand(PlayerCharacter* player, bool leftHand)
-    {
-        TESForm* form = player->GetEquippedObject(leftHand);
-        if (!form) return false;
-        if (skyrim_cast<TESObjectWEAP*>(form)) return false;
-        if (skyrim_cast<SpellItem*>(form)) return true;
-        return false;
-    }
-
     bool IsGameplayInputAllowed()
     {
         auto* ui = UI::GetSingleton();
@@ -315,10 +306,10 @@ namespace {
         return true;
     }
 
-    bool HandleButtonEvent(ButtonEvent* button)
+    void HandleButtonEvent(ButtonEvent* button)
     {
         if (!button) {
-            return false;
+            return;
         }
 
         const uint32_t keyCode = ToMacroKeyCode(button);
@@ -327,30 +318,26 @@ namespace {
 
         const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
         if (!isDown) {
-            return false;
+            return;
         }
 
         const bool isRightKey = (g_altPowerAttackKey.load() != kKeyDisabled) && (keyCode == g_altPowerAttackKey.load());
         const bool isLeftKey = (g_altLeftPowerAttackKey.load() != kKeyDisabled) && (keyCode == g_altLeftPowerAttackKey.load());
-        if (!isRightKey && !isLeftKey) return false;
+        if (!isRightKey && !isLeftKey) return;
 
         auto* player = PlayerCharacter::GetSingleton();
-        if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
+        if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return;
 
         if (isRightKey && IsModifierKeyPressed(g_rightModifierKey.load())) {
             TriggerPowerAttack(player);
-            return true;
         }
 
         if (isLeftKey && IsLeftHandValidForPowerAttack(player) && IsModifierKeyPressed(g_leftModifierKey.load())) {
             TriggerLeftPowerAttack(player);
-            return true;
         }
-
-        return false;
     }
 
-    bool ProcessInputChain(RE::InputEvent* events)
+    void ProcessInputChain(RE::InputEvent* events)
     {
         for (auto* event = events; event; event = event->next) {
             if (event->eventType.get() != INPUT_EVENT_TYPE::kButton) {
@@ -358,12 +345,8 @@ namespace {
             }
 
             auto* button = event->AsButtonEvent();
-            if (HandleButtonEvent(button)) {
-                return true;
-            }
+            HandleButtonEvent(button);
         }
-
-        return false;
     }
 
     void TriggerPowerAttack(PlayerCharacter* player)
@@ -730,7 +713,8 @@ namespace {
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
     {
-        return events ? ProcessInputChain(events) : false;
+        if (events) ProcessInputChain(events);
+        return false;
     }
 
     class RawInputEventSink : public BSTEventSink<InputEvents> {
