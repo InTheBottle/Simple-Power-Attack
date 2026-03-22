@@ -102,7 +102,7 @@ namespace {
     float g_vanillaPowerAttackDelay = 0.0f;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
-    BSTEventSink<InputEvents>* g_rawInputSink = nullptr;
+
     CSimpleIniA g_ini(true, false, false);
     REL::Relocation<Setting*> g_initialPowerAttackDelay{ RELOCATION_ID(509496, 381954) };
 
@@ -227,8 +227,11 @@ namespace {
         auto* leftWeap = skyrim_cast<TESObjectWEAP*>(leftForm);
         if (!rightWeap || !leftWeap) return false;
 
-        return rightWeap->IsOneHandedSword() || rightWeap->IsOneHandedDagger() ||
-               rightWeap->IsOneHandedAxe() || rightWeap->IsOneHandedMace();
+        auto isOneHandedMelee = [](TESObjectWEAP* w) {
+            return w->IsOneHandedSword() || w->IsOneHandedDagger() ||
+                   w->IsOneHandedAxe() || w->IsOneHandedMace();
+        };
+        return isOneHandedMelee(rightWeap) && isOneHandedMelee(leftWeap);
     }
 
     bool IsLeftHandValidForPowerAttack(PlayerCharacter* player)
@@ -310,10 +313,10 @@ namespace {
         return true;
     }
 
-    void HandleButtonEvent(ButtonEvent* button)
+    bool HandleButtonEvent(ButtonEvent* button)
     {
         if (!button || !g_pluginEnabled.load()) {
-            return;
+            return false;
         }
 
         const uint32_t keyCode = ToMacroKeyCode(button);
@@ -322,23 +325,31 @@ namespace {
 
         const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
         if (!isDown) {
-            return;
+            return false;
         }
 
-        const bool isRightKey = (g_altPowerAttackKey.load() != kKeyDisabled) && (keyCode == g_altPowerAttackKey.load());
-        const bool isLeftKey = (g_altLeftPowerAttackKey.load() != kKeyDisabled) && (keyCode == g_altLeftPowerAttackKey.load());
-        if (!isRightKey && !isLeftKey) return;
+        const uint32_t rightKey = g_altPowerAttackKey.load();
+        const uint32_t leftKey = g_altLeftPowerAttackKey.load();
+        const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
+        const bool isLeftKey = (leftKey != kKeyDisabled) && (keyCode == leftKey);
+        if (!isRightKey && !isLeftKey) return false;
 
         auto* player = PlayerCharacter::GetSingleton();
-        if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return;
+        if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
+
+        bool consumed = false;
 
         if (isRightKey && IsModifierKeyPressed(g_rightModifierKey.load())) {
             TriggerPowerAttack(player);
+            consumed = true;
         }
 
         if (isLeftKey && IsLeftHandValidForPowerAttack(player) && IsModifierKeyPressed(g_leftModifierKey.load())) {
             TriggerLeftPowerAttack(player);
+            consumed = true;
         }
+
+        return consumed;
     }
 
     void ProcessInputChain(RE::InputEvent* events)
@@ -349,7 +360,9 @@ namespace {
             }
 
             auto* button = event->AsButtonEvent();
-            HandleButtonEvent(button);
+            if (HandleButtonEvent(button)) {
+                button->GetRuntimeData().value = 0.0f;
+            }
         }
     }
 
@@ -361,7 +374,8 @@ namespace {
             ? g_dualPowerAttackAction
             : g_rightPowerAttackAction;
 
-        g_task->AddTask([player, action]() {
+        const bool mcoMode = g_mcoMode.load();
+        g_task->AddTask([player, action, mcoMode]() {
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
@@ -369,6 +383,10 @@ namespace {
             using ProcessAction_t = bool (*)(TESActionData*);
             REL::Relocation<ProcessAction_t> processAction{ RELOCATION_ID(40551, 41557) };
             processAction(data.get());
+
+            if (mcoMode) {
+                player->NotifyAnimationGraph("Hitframe");
+            }
         });
     }
 
@@ -376,7 +394,8 @@ namespace {
     {
         if (!g_task || !g_leftPowerAttackAction || !player) return;
 
-        g_task->AddTask([player, action = g_leftPowerAttackAction]() {
+        const bool mcoMode = g_mcoMode.load();
+        g_task->AddTask([player, action = g_leftPowerAttackAction, mcoMode]() {
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
@@ -384,6 +403,10 @@ namespace {
             using ProcessAction_t = bool (*)(TESActionData*);
             REL::Relocation<ProcessAction_t> processAction{ RELOCATION_ID(40551, 41557) };
             processAction(data.get());
+
+            if (mcoMode) {
+                player->NotifyAnimationGraph("Hitframe");
+            }
         });
     }
 
@@ -755,18 +778,7 @@ namespace {
         return false;
     }
 
-    class RawInputEventSink : public BSTEventSink<InputEvents> {
-    public:
-        BSEventNotifyControl ProcessEvent(const InputEvents* events, BSTEventSource<InputEvents>*) override
-        {
-            if (events && *events) {
-                ProcessInputChain(const_cast<InputEvent*>(*events));
-            }
-            return BSEventNotifyControl::kContinue;
-        }
 
-        TES_HEAP_REDEFINE_NEW();
-    };
 
     void __stdcall OnMenuFrameworkEvent(SKSEMenuFramework::Model::EventType eventType)
     {
@@ -879,13 +891,12 @@ SKSEPluginLoad(const LoadInterface* skse)
             return;
         }
 
-        // Capture vanilla delay BEFORE LoadConfig modifies it
         g_vanillaPowerAttackDelay = g_initialPowerAttackDelay->data.f;
 
         LoadConfig();
 
         SKSEMenuFramework::SetSection("SimplePowerAttack");
-        SKSEMenuFramework::AddSectionItem("Simple Power Attack", RenderMenuFrameworkSection);
+        SKSEMenuFramework::AddSectionItem("Settings", RenderMenuFrameworkSection);
 
         if (!g_menuFrameworkInputHook) {
             g_menuFrameworkInputHook = SKSEMenuFramework::AddInputEvent(OnMenuFrameworkInput);
@@ -893,12 +904,7 @@ SKSEPluginLoad(const LoadInterface* skse)
         if (!g_menuFrameworkEventHook) {
             g_menuFrameworkEventHook = SKSEMenuFramework::AddEvent(OnMenuFrameworkEvent, 0.0f);
         }
-        if (!g_rawInputSink) {
-            if (auto* inputManager = BSInputDeviceManager::GetSingleton()) {
-                g_rawInputSink = new RawInputEventSink();
-                inputManager->AddEventSink(g_rawInputSink);
-            }
-        }
+
 
         SKSE::log::info("Initialized — right keycode={}, left keycode={}, block keycode={}", g_altPowerAttackKey.load(), g_altLeftPowerAttackKey.load(), g_altBlockKey.load());
     });
