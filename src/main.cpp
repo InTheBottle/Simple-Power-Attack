@@ -121,6 +121,7 @@ namespace {
     bool g_pendingPluginEnabled = true;
     bool g_hasUnsavedEnabledChange = false;
     float g_vanillaPowerAttackDelay = 0.0f;
+    std::atomic<uint64_t> g_lastDualPATime = 0;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
 
@@ -130,6 +131,7 @@ namespace {
     void LoadConfig();
     void TriggerPowerAttack(PlayerCharacter* player);
     void TriggerLeftPowerAttack(PlayerCharacter* player);
+    void TriggerDualPowerAttack(PlayerCharacter* player);
 
     std::string GetPrimaryConfigPath()
     {
@@ -253,6 +255,50 @@ namespace {
                    w->IsOneHandedAxe() || w->IsOneHandedMace();
         };
         return isOneHandedMelee(rightWeap) && isOneHandedMelee(leftWeap);
+    }
+
+    bool IsKeyCurrentlyHeld(uint32_t macroKeyCode)
+    {
+        if (macroKeyCode == kKeyDisabled) return false;
+
+        if (macroKeyCode >= kMacroNumKeyboardKeys && macroKeyCode < kMacroGamepadOffset) {
+            int vk = 0;
+            switch (macroKeyCode) {
+            case 256: vk = VK_LBUTTON; break;
+            case 257: vk = VK_RBUTTON; break;
+            case 258: vk = VK_MBUTTON; break;
+            case 259: vk = VK_XBUTTON1; break;
+            case 260: vk = VK_XBUTTON2; break;
+            default: return false;
+            }
+            return (GetAsyncKeyState(vk) & 0x8000) != 0;
+        }
+
+        if (macroKeyCode >= kMacroGamepadOffset && macroKeyCode < kMaxMacros) {
+            XINPUT_STATE state{};
+            if (XInputGetState(0, &state) != ERROR_SUCCESS) return false;
+            switch (macroKeyCode) {
+            case 266: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP) != 0;
+            case 267: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
+            case 268: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
+            case 269: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
+            case 270: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_START) != 0;
+            case 271: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) != 0;
+            case 272: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+            case 273: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+            case 274: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
+            case 275: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
+            case 276: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
+            case 277: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
+            case 278: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_X) != 0;
+            case 279: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_Y) != 0;
+            case 280: return state.Gamepad.bLeftTrigger > 128;
+            case 281: return state.Gamepad.bRightTrigger > 128;
+            default: return false;
+            }
+        }
+
+        return false;
     }
 
     bool IsLeftHandValidForPowerAttack(PlayerCharacter* player)
@@ -390,7 +436,13 @@ namespace {
                 ? IsGamepadModifierPressed(g_rightGamepadModifier.load())
                 : IsModifierKeyPressed(g_rightModifierKey.load());
             if (modPressed) {
-                TriggerPowerAttack(player);
+                if (g_dualPowerAttackAction && leftKey != kKeyDisabled &&
+                    IsKeyCurrentlyHeld(leftKey) && IsDualWielding(player)) {
+                    TriggerDualPowerAttack(player);
+                    g_lastDualPATime.store(GetTickCount64());
+                } else {
+                    TriggerPowerAttack(player);
+                }
                 consumed = true;
             }
         }
@@ -400,7 +452,10 @@ namespace {
                 ? IsGamepadModifierPressed(g_leftGamepadModifier.load())
                 : IsModifierKeyPressed(g_leftModifierKey.load());
             if (IsLeftHandValidForPowerAttack(player) && modPressed) {
-                TriggerLeftPowerAttack(player);
+                const uint64_t elapsed = GetTickCount64() - g_lastDualPATime.load();
+                if (elapsed > 200) {
+                    TriggerLeftPowerAttack(player);
+                }
                 consumed = true;
             }
         }
@@ -410,13 +465,14 @@ namespace {
 
     void ProcessInputChain(RE::InputEvent* events)
     {
+        const bool mcoMode = g_mcoMode.load();
         for (auto* event = events; event; event = event->next) {
             if (event->eventType.get() != INPUT_EVENT_TYPE::kButton) {
                 continue;
             }
 
             auto* button = event->AsButtonEvent();
-            if (HandleButtonEvent(button)) {
+            if (HandleButtonEvent(button) && mcoMode) {
                 button->GetRuntimeData().value = 0.0f;
             }
         }
@@ -426,11 +482,8 @@ namespace {
     {
         if (!g_task || !g_rightPowerAttackAction || !player) return;
 
-        BGSAction* action = (g_dualPowerAttackAction && IsDualWielding(player))
-            ? g_dualPowerAttackAction : g_rightPowerAttackAction;
-
         const bool mcoMode = g_mcoMode.load();
-        g_task->AddTask([player, action, mcoMode]() {
+        g_task->AddTask([player, action = g_rightPowerAttackAction, mcoMode]() {
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
@@ -451,6 +504,26 @@ namespace {
 
         const bool mcoMode = g_mcoMode.load();
         g_task->AddTask([player, action = g_leftPowerAttackAction, mcoMode]() {
+            std::unique_ptr<TESActionData> data(TESActionData::Create());
+            data->source = NiPointer<TESObjectREFR>(player);
+            data->action = action;
+
+            using ProcessAction_t = bool (*)(TESActionData*);
+            REL::Relocation<ProcessAction_t> processAction{ RELOCATION_ID(40551, 41557) };
+            processAction(data.get());
+
+            if (mcoMode) {
+                player->NotifyAnimationGraph("Hitframe");
+            }
+        });
+    }
+
+    void TriggerDualPowerAttack(PlayerCharacter* player)
+    {
+        if (!g_task || !g_dualPowerAttackAction || !player) return;
+
+        const bool mcoMode = g_mcoMode.load();
+        g_task->AddTask([player, action = g_dualPowerAttackAction, mcoMode]() {
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
@@ -658,7 +731,7 @@ namespace {
 
         ImGuiMCP::Separator();
 
-        if (ImGuiMCP::Checkbox("MCO Dual Wield Fix", &chosenMco)) {
+        if (ImGuiMCP::Checkbox("MCO Compatibility", &chosenMco)) {
             mcoChanged = true;
         }
 
