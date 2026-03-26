@@ -72,6 +72,18 @@ namespace {
         { "Right Alt (184)", 184 }
     } };
 
+    constexpr std::array<KeyOption, 9> kGamepadModifierOptions{ {
+        { "None (No modifier)", 0 },
+        { "Left Shoulder / LB (274)", 274 },
+        { "Right Shoulder / RB (275)", 275 },
+        { "Left Thumb / LS (272)", 272 },
+        { "Right Thumb / RS (273)", 273 },
+        { "A (276)", 276 },
+        { "B (277)", 277 },
+        { "Left Trigger / LT (280)", 280 },
+        { "Right Trigger / RT (281)", 281 }
+    } };
+
     constexpr const char* kPrimaryConfigFileName = "SimplePowerAttack.ini";
 
     const TaskInterface* g_task = nullptr;
@@ -93,9 +105,18 @@ namespace {
     std::atomic<uint32_t> g_leftModifierKey = kModifierNone;
     uint32_t g_pendingLeftModifierKey = kModifierNone;
     bool g_hasUnsavedLeftModChange = false;
+    std::atomic<uint32_t> g_rightGamepadModifier = kModifierNone;
+    uint32_t g_pendingRightGamepadModifier = kModifierNone;
+    bool g_hasUnsavedRightGPModChange = false;
+    std::atomic<uint32_t> g_leftGamepadModifier = kModifierNone;
+    uint32_t g_pendingLeftGamepadModifier = kModifierNone;
+    bool g_hasUnsavedLeftGPModChange = false;
     std::atomic<bool> g_mcoMode = false;
     bool g_pendingMcoMode = false;
     bool g_hasUnsavedMcoChange = false;
+    std::atomic<bool> g_noStaminaPowerAttack = false;
+    bool g_pendingNoStaminaPowerAttack = false;
+    bool g_hasUnsavedNoStaminaChange = false;
     std::atomic<bool> g_pluginEnabled = true;
     bool g_pendingPluginEnabled = true;
     bool g_hasUnsavedEnabledChange = false;
@@ -283,6 +304,26 @@ namespace {
         return (GetAsyncKeyState(vk) & 0x8000) != 0;
     }
 
+    bool IsGamepadModifierPressed(uint32_t modifierKey)
+    {
+        if (modifierKey == kModifierNone) return true;
+
+        XINPUT_STATE state{};
+        if (XInputGetState(0, &state) != ERROR_SUCCESS) return false;
+
+        switch (modifierKey) {
+        case 272: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+        case 273: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+        case 274: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
+        case 275: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
+        case 276: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
+        case 277: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
+        case 280: return state.Gamepad.bLeftTrigger > 128;
+        case 281: return state.Gamepad.bRightTrigger > 128;
+        default:  return false;
+        }
+    }
+
     bool HandleBlockEvent(ButtonEvent* button, uint32_t keyCode)
     {
         const uint32_t blockKey = g_altBlockKey.load();
@@ -337,16 +378,31 @@ namespace {
         auto* player = PlayerCharacter::GetSingleton();
         if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
 
-        bool consumed = false;
-
-        if (isRightKey && IsModifierKeyPressed(g_rightModifierKey.load())) {
-            TriggerPowerAttack(player);
-            consumed = true;
+        if (g_noStaminaPowerAttack.load() && player->AsActorValueOwner()->GetActorValue(ActorValue::kStamina) <= 0.0f) {
+            return false;
         }
 
-        if (isLeftKey && IsLeftHandValidForPowerAttack(player) && IsModifierKeyPressed(g_leftModifierKey.load())) {
-            TriggerLeftPowerAttack(player);
-            consumed = true;
+        const bool isGamepad = button->device.get() == INPUT_DEVICE::kGamepad;
+        bool consumed = false;
+
+        if (isRightKey) {
+            const bool modPressed = isGamepad
+                ? IsGamepadModifierPressed(g_rightGamepadModifier.load())
+                : IsModifierKeyPressed(g_rightModifierKey.load());
+            if (modPressed) {
+                TriggerPowerAttack(player);
+                consumed = true;
+            }
+        }
+
+        if (isLeftKey && !consumed) {
+            const bool modPressed = isGamepad
+                ? IsGamepadModifierPressed(g_leftGamepadModifier.load())
+                : IsModifierKeyPressed(g_leftModifierKey.load());
+            if (IsLeftHandValidForPowerAttack(player) && modPressed) {
+                TriggerLeftPowerAttack(player);
+                consumed = true;
+            }
         }
 
         return consumed;
@@ -370,9 +426,8 @@ namespace {
     {
         if (!g_task || !g_rightPowerAttackAction || !player) return;
 
-        BGSAction* action = (!g_mcoMode.load() && g_dualPowerAttackAction && IsDualWielding(player))
-            ? g_dualPowerAttackAction
-            : g_rightPowerAttackAction;
+        BGSAction* action = (g_dualPowerAttackAction && IsDualWielding(player))
+            ? g_dualPowerAttackAction : g_rightPowerAttackAction;
 
         const bool mcoMode = g_mcoMode.load();
         g_task->AddTask([player, action, mcoMode]() {
@@ -426,6 +481,13 @@ namespace {
         return keyCode;  
     }
 
+    uint32_t SanitizeGamepadModifierCode(uint32_t keyCode)
+    {
+        if (keyCode == kModifierNone) return kModifierNone;
+        if (keyCode < kMacroGamepadOffset || keyCode >= kMaxMacros) return kModifierNone;
+        return keyCode;
+    }
+
     void ApplyPluginEnabledState(bool enabled)
     {
         if (enabled) {
@@ -436,13 +498,17 @@ namespace {
     }
 
     bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t blockKeyCode,
-                     uint32_t rightMod, uint32_t leftMod, bool mcoMode, bool pluginEnabled)
+                     uint32_t rightMod, uint32_t leftMod,
+                     uint32_t rightGPMod, uint32_t leftGPMod,
+                     bool mcoMode, bool noStaminaPA, bool pluginEnabled)
     {
         keyCode = SanitizeKeyCode(keyCode);
         leftKeyCode = SanitizeKeyCode(leftKeyCode);
         blockKeyCode = SanitizeKeyCode(blockKeyCode);
         rightMod = SanitizeModifierKeyCode(rightMod);
         leftMod = SanitizeModifierKeyCode(leftMod);
+        rightGPMod = SanitizeGamepadModifierCode(rightGPMod);
+        leftGPMod = SanitizeGamepadModifierCode(leftGPMod);
         const std::string savePath = GetPrimaryConfigPath();
 
         g_ini.Reset();
@@ -452,7 +518,10 @@ namespace {
         g_ini.SetLongValue("General", "iBlockKeycode", static_cast<long>(blockKeyCode));
         g_ini.SetLongValue("General", "iRightModifier", static_cast<long>(rightMod));
         g_ini.SetLongValue("General", "iLeftModifier", static_cast<long>(leftMod));
+        g_ini.SetLongValue("General", "iRightGamepadModifier", static_cast<long>(rightGPMod));
+        g_ini.SetLongValue("General", "iLeftGamepadModifier", static_cast<long>(leftGPMod));
         g_ini.SetBoolValue("MCO", "bMCOMode", mcoMode);
+        g_ini.SetBoolValue("General", "bPowerAttackNoStamina", noStaminaPA);
 
         try {
             std::filesystem::path savePathFs(savePath);
@@ -471,8 +540,8 @@ namespace {
             return false;
         }
 
-        SKSE::log::info("Saved config enabled={} right={} left={} block={} rmod={} lmod={} mco={} to '{}'",
-            pluginEnabled, keyCode, leftKeyCode, blockKeyCode, rightMod, leftMod, mcoMode, savePath);
+        SKSE::log::info("Saved config enabled={} right={} left={} block={} rmod={} lmod={} rgmod={} lgmod={} mco={} noStaminaPA={} to '{}'",
+            pluginEnabled, keyCode, leftKeyCode, blockKeyCode, rightMod, leftMod, rightGPMod, leftGPMod, mcoMode, noStaminaPA, savePath);
         return true;
     }
 
@@ -520,8 +589,14 @@ namespace {
         const uint32_t pendingRMod = g_pendingRightModifierKey;
         const uint32_t currentLMod = g_leftModifierKey.load();
         const uint32_t pendingLMod = g_pendingLeftModifierKey;
+        const uint32_t currentRGPMod = g_rightGamepadModifier.load();
+        const uint32_t pendingRGPMod = g_pendingRightGamepadModifier;
+        const uint32_t currentLGPMod = g_leftGamepadModifier.load();
+        const uint32_t pendingLGPMod = g_pendingLeftGamepadModifier;
         const bool currentMco = g_mcoMode.load();
         bool pendingMco = g_pendingMcoMode;
+        const bool currentNoStamina = g_noStaminaPowerAttack.load();
+        bool pendingNoStamina = g_pendingNoStaminaPowerAttack;
         const bool currentEnabled = g_pluginEnabled.load();
         bool pendingEnabled = g_pendingPluginEnabled;
 
@@ -533,14 +608,20 @@ namespace {
         uint32_t chosenBlockCode = pendingBlockCode;
         uint32_t chosenRMod = pendingRMod;
         uint32_t chosenLMod = pendingLMod;
+        uint32_t chosenRGPMod = pendingRGPMod;
+        uint32_t chosenLGPMod = pendingLGPMod;
         bool chosenMco = pendingMco;
+        bool chosenNoStamina = pendingNoStamina;
         bool chosenEnabled = pendingEnabled;
         bool changed = false;
         bool leftChanged = false;
         bool blockChanged = false;
         bool rModChanged = false;
         bool lModChanged = false;
+        bool rGPModChanged = false;
+        bool lGPModChanged = false;
         bool mcoChanged = false;
+        bool noStaminaChanged = false;
         bool enabledChanged = false;
 
         // --- Mouse / Keyboard Section ---
@@ -563,10 +644,12 @@ namespace {
         if (ImGuiMCP::CollapsingHeader("Controller", 0)) {
             ImGuiMCP::Text("Right Power Attack");
             changed = DrawKeyOptionCombo("Button##gp_right", kGamepadOptions, pendingCode, chosenCode) || changed;
+            rGPModChanged = DrawKeyOptionCombo("Modifier##gp_rmod", kGamepadModifierOptions, pendingRGPMod, chosenRGPMod) || rGPModChanged;
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Left Power Attack");
             leftChanged = DrawKeyOptionCombo("Button##gp_left", kGamepadOptions, pendingLeftCode, chosenLeftCode) || leftChanged;
+            lGPModChanged = DrawKeyOptionCombo("Modifier##gp_lmod", kGamepadModifierOptions, pendingLGPMod, chosenLGPMod) || lGPModChanged;
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Block");
@@ -575,8 +658,12 @@ namespace {
 
         ImGuiMCP::Separator();
 
-        if (ImGuiMCP::Checkbox("MCO Mode (Dual Wield Fix)", &chosenMco)) {
+        if (ImGuiMCP::Checkbox("MCO Dual Wield Fix", &chosenMco)) {
             mcoChanged = true;
+        }
+
+        if (ImGuiMCP::Checkbox("Disable Power Attack at 0 Stamina", &chosenNoStamina)) {
+            noStaminaChanged = true;
         }
 
         bool disableChecked = !pendingEnabled;
@@ -610,9 +697,24 @@ namespace {
             g_hasUnsavedLeftModChange = (g_pendingLeftModifierKey != currentLMod);
         }
 
+        if (rGPModChanged) {
+            g_pendingRightGamepadModifier = SanitizeGamepadModifierCode(chosenRGPMod);
+            g_hasUnsavedRightGPModChange = (g_pendingRightGamepadModifier != currentRGPMod);
+        }
+
+        if (lGPModChanged) {
+            g_pendingLeftGamepadModifier = SanitizeGamepadModifierCode(chosenLGPMod);
+            g_hasUnsavedLeftGPModChange = (g_pendingLeftGamepadModifier != currentLGPMod);
+        }
+
         if (mcoChanged) {
             g_pendingMcoMode = chosenMco;
             g_hasUnsavedMcoChange = (g_pendingMcoMode != currentMco);
+        }
+
+        if (noStaminaChanged) {
+            g_pendingNoStaminaPowerAttack = chosenNoStamina;
+            g_hasUnsavedNoStaminaChange = (g_pendingNoStaminaPowerAttack != currentNoStamina);
         }
 
         if (enabledChanged) {
@@ -622,7 +724,8 @@ namespace {
 
         const bool hasUnsaved = g_hasUnsavedKeyChange || g_hasUnsavedLeftKeyChange ||
             g_hasUnsavedBlockKeyChange || g_hasUnsavedRightModChange || g_hasUnsavedLeftModChange ||
-            g_hasUnsavedMcoChange || g_hasUnsavedEnabledChange;
+            g_hasUnsavedRightGPModChange || g_hasUnsavedLeftGPModChange ||
+            g_hasUnsavedMcoChange || g_hasUnsavedNoStaminaChange || g_hasUnsavedEnabledChange;
 
         ImGuiMCP::Separator();
 
@@ -636,9 +739,12 @@ namespace {
             const uint32_t saveBlockCode = SanitizeKeyCode(g_pendingAltBlockKey);
             const uint32_t saveRMod = SanitizeModifierKeyCode(g_pendingRightModifierKey);
             const uint32_t saveLMod = SanitizeModifierKeyCode(g_pendingLeftModifierKey);
+            const uint32_t saveRGPMod = SanitizeGamepadModifierCode(g_pendingRightGamepadModifier);
+            const uint32_t saveLGPMod = SanitizeGamepadModifierCode(g_pendingLeftGamepadModifier);
             const bool saveMco = g_pendingMcoMode;
+            const bool saveNoStamina = g_pendingNoStaminaPowerAttack;
             const bool saveEnabled = g_pendingPluginEnabled;
-            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveRMod, saveLMod, saveMco, saveEnabled)) {
+            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveRMod, saveLMod, saveRGPMod, saveLGPMod, saveMco, saveNoStamina, saveEnabled)) {
                 g_altPowerAttackKey = saveCode;
                 g_pendingAltPowerAttackKey = saveCode;
                 g_hasUnsavedKeyChange = false;
@@ -654,9 +760,18 @@ namespace {
                 g_leftModifierKey = saveLMod;
                 g_pendingLeftModifierKey = saveLMod;
                 g_hasUnsavedLeftModChange = false;
+                g_rightGamepadModifier = saveRGPMod;
+                g_pendingRightGamepadModifier = saveRGPMod;
+                g_hasUnsavedRightGPModChange = false;
+                g_leftGamepadModifier = saveLGPMod;
+                g_pendingLeftGamepadModifier = saveLGPMod;
+                g_hasUnsavedLeftGPModChange = false;
                 g_mcoMode = saveMco;
                 g_pendingMcoMode = saveMco;
                 g_hasUnsavedMcoChange = false;
+                g_noStaminaPowerAttack = saveNoStamina;
+                g_pendingNoStaminaPowerAttack = saveNoStamina;
+                g_hasUnsavedNoStaminaChange = false;
                 g_pluginEnabled = saveEnabled;
                 g_pendingPluginEnabled = saveEnabled;
                 g_hasUnsavedEnabledChange = false;
@@ -677,8 +792,14 @@ namespace {
             g_hasUnsavedRightModChange = false;
             g_pendingLeftModifierKey = currentLMod;
             g_hasUnsavedLeftModChange = false;
+            g_pendingRightGamepadModifier = currentRGPMod;
+            g_hasUnsavedRightGPModChange = false;
+            g_pendingLeftGamepadModifier = currentLGPMod;
+            g_hasUnsavedLeftGPModChange = false;
             g_pendingMcoMode = currentMco;
             g_hasUnsavedMcoChange = false;
+            g_pendingNoStaminaPowerAttack = currentNoStamina;
+            g_hasUnsavedNoStaminaChange = false;
             g_pendingPluginEnabled = currentEnabled;
             g_hasUnsavedEnabledChange = false;
         }
@@ -712,9 +833,18 @@ namespace {
             g_leftModifierKey = kModifierNone;
             g_pendingLeftModifierKey = kModifierNone;
             g_hasUnsavedLeftModChange = false;
+            g_rightGamepadModifier = kModifierNone;
+            g_pendingRightGamepadModifier = kModifierNone;
+            g_hasUnsavedRightGPModChange = false;
+            g_leftGamepadModifier = kModifierNone;
+            g_pendingLeftGamepadModifier = kModifierNone;
+            g_hasUnsavedLeftGPModChange = false;
             g_mcoMode = false;
             g_pendingMcoMode = false;
             g_hasUnsavedMcoChange = false;
+            g_noStaminaPowerAttack = false;
+            g_pendingNoStaminaPowerAttack = false;
+            g_hasUnsavedNoStaminaChange = false;
             g_pluginEnabled = true;
             g_pendingPluginEnabled = true;
             g_hasUnsavedEnabledChange = false;
@@ -756,10 +886,28 @@ namespace {
         g_pendingLeftModifierKey = parsedLMod;
         g_hasUnsavedLeftModChange = false;
 
+        const long rawRGPMod = g_ini.GetLongValue("General", "iRightGamepadModifier", static_cast<long>(kModifierNone));
+        uint32_t parsedRGPMod = SanitizeGamepadModifierCode(static_cast<uint32_t>(rawRGPMod < 0 ? 0 : rawRGPMod));
+
+        const long rawLGPMod = g_ini.GetLongValue("General", "iLeftGamepadModifier", static_cast<long>(kModifierNone));
+        uint32_t parsedLGPMod = SanitizeGamepadModifierCode(static_cast<uint32_t>(rawLGPMod < 0 ? 0 : rawLGPMod));
+
+        g_rightGamepadModifier = parsedRGPMod;
+        g_pendingRightGamepadModifier = parsedRGPMod;
+        g_hasUnsavedRightGPModChange = false;
+        g_leftGamepadModifier = parsedLGPMod;
+        g_pendingLeftGamepadModifier = parsedLGPMod;
+        g_hasUnsavedLeftGPModChange = false;
+
         const bool parsedMco = g_ini.GetBoolValue("MCO", "bMCOMode", false);
         g_mcoMode = parsedMco;
         g_pendingMcoMode = parsedMco;
         g_hasUnsavedMcoChange = false;
+
+        const bool parsedNoStamina = g_ini.GetBoolValue("General", "bPowerAttackNoStamina", false);
+        g_noStaminaPowerAttack = parsedNoStamina;
+        g_pendingNoStaminaPowerAttack = parsedNoStamina;
+        g_hasUnsavedNoStaminaChange = false;
 
         const bool parsedEnabled = g_ini.GetBoolValue("General", "bEnabled", true);
         g_pluginEnabled = parsedEnabled;
@@ -768,8 +916,8 @@ namespace {
 
         g_ini.Reset();
         ApplyPluginEnabledState(parsedEnabled);
-        SKSE::log::info("Loaded config enabled={} right={} left={} block={} rmod={} lmod={} mco={} from '{}'",
-            parsedEnabled, parsedKey, parsedLeftKey, parsedBlockKey, parsedRMod, parsedLMod, parsedMco, path);
+        SKSE::log::info("Loaded config enabled={} right={} left={} block={} rmod={} lmod={} rgpmod={} lgpmod={} mco={} noStaminaPA={} from '{}'",
+            parsedEnabled, parsedKey, parsedLeftKey, parsedBlockKey, parsedRMod, parsedLMod, parsedRGPMod, parsedLGPMod, parsedMco, parsedNoStamina, path);
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
@@ -803,9 +951,21 @@ namespace {
                 g_pendingLeftModifierKey = g_leftModifierKey.load();
                 g_hasUnsavedLeftModChange = false;
             }
+            if (g_hasUnsavedRightGPModChange) {
+                g_pendingRightGamepadModifier = g_rightGamepadModifier.load();
+                g_hasUnsavedRightGPModChange = false;
+            }
+            if (g_hasUnsavedLeftGPModChange) {
+                g_pendingLeftGamepadModifier = g_leftGamepadModifier.load();
+                g_hasUnsavedLeftGPModChange = false;
+            }
             if (g_hasUnsavedMcoChange) {
                 g_pendingMcoMode = g_mcoMode.load();
                 g_hasUnsavedMcoChange = false;
+            }
+            if (g_hasUnsavedNoStaminaChange) {
+                g_pendingNoStaminaPowerAttack = g_noStaminaPowerAttack.load();
+                g_hasUnsavedNoStaminaChange = false;
             }
             if (g_hasUnsavedEnabledChange) {
                 g_pendingPluginEnabled = g_pluginEnabled.load();

@@ -72,7 +72,8 @@ target_include_directories(${PROJECT_NAME}
 
 target_link_libraries(${PROJECT_NAME}
         PRIVATE
-        CommonLibSSE::CommonLibSSE)
+        CommonLibSSE::CommonLibSSE
+        xinput.lib)
 
 target_precompile_headers(${PROJECT_NAME}
         PRIVATE
