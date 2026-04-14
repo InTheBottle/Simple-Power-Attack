@@ -1,5 +1,4 @@
 #include <SimpleIni.h>
-#include <Xinput.h>
 #include <ShlObj.h>
 
 #include "SKSEMenuFramework.h"
@@ -27,6 +26,26 @@ namespace {
     constexpr uint32_t kMacroMouseWheelOffset = kMacroNumKeyboardKeys + kMacroNumMouseButtons;
     constexpr uint32_t kMacroGamepadOffset = kMacroMouseWheelOffset + 2;
     constexpr uint32_t kMaxMacros = kMacroGamepadOffset + 16;
+
+    // Skyrim gamepad button IDs (from ButtonEvent::GetIDCode for kGamepad device).
+    // These match the values the game engine uses internally regardless of controller type,
+    // so they work with Xbox, PS5 DualSense, and any other controller via Steam Input.
+    constexpr uint32_t kGamepadDpadUp        = 0x0001;
+    constexpr uint32_t kGamepadDpadDown      = 0x0002;
+    constexpr uint32_t kGamepadDpadLeft      = 0x0004;
+    constexpr uint32_t kGamepadDpadRight     = 0x0008;
+    constexpr uint32_t kGamepadStart         = 0x0010;
+    constexpr uint32_t kGamepadBack          = 0x0020;
+    constexpr uint32_t kGamepadLeftThumb     = 0x0040;
+    constexpr uint32_t kGamepadRightThumb    = 0x0080;
+    constexpr uint32_t kGamepadLeftShoulder  = 0x0100;
+    constexpr uint32_t kGamepadRightShoulder = 0x0200;
+    constexpr uint32_t kGamepadA             = 0x1000;
+    constexpr uint32_t kGamepadB             = 0x2000;
+    constexpr uint32_t kGamepadX             = 0x4000;
+    constexpr uint32_t kGamepadY             = 0x8000;
+    constexpr uint32_t kGamepadLT            = 0x0009;
+    constexpr uint32_t kGamepadRT            = 0x000A;
 
     constexpr std::array<KeyOption, 11> kMouseOptions{ {
         { "None (Disabled)", 0 },
@@ -125,6 +144,10 @@ namespace {
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
 
+    // Controller-agnostic key state tracking, updated from input events each frame.
+    // Indexed by macro keycode (0..kMaxMacros-1). Works with any controller type.
+    std::array<std::atomic<bool>, kMaxMacros> g_keyStates{};
+
     CSimpleIniA g_ini(true, false, false);
     REL::Relocation<Setting*> g_initialPowerAttackDelay{ RELOCATION_ID(509496, 381954) };
 
@@ -149,40 +172,23 @@ namespace {
     uint32_t GamepadMaskToKeycode(uint32_t keyMask)
     {
         switch (keyMask) {
-        case XINPUT_GAMEPAD_DPAD_UP:
-            return kMacroGamepadOffset;
-        case XINPUT_GAMEPAD_DPAD_DOWN:
-            return kMacroGamepadOffset + 1;
-        case XINPUT_GAMEPAD_DPAD_LEFT:
-            return kMacroGamepadOffset + 2;
-        case XINPUT_GAMEPAD_DPAD_RIGHT:
-            return kMacroGamepadOffset + 3;
-        case XINPUT_GAMEPAD_START:
-            return kMacroGamepadOffset + 4;
-        case XINPUT_GAMEPAD_BACK:
-            return kMacroGamepadOffset + 5;
-        case XINPUT_GAMEPAD_LEFT_THUMB:
-            return kMacroGamepadOffset + 6;
-        case XINPUT_GAMEPAD_RIGHT_THUMB:
-            return kMacroGamepadOffset + 7;
-        case XINPUT_GAMEPAD_LEFT_SHOULDER:
-            return kMacroGamepadOffset + 8;
-        case XINPUT_GAMEPAD_RIGHT_SHOULDER:
-            return kMacroGamepadOffset + 9;
-        case XINPUT_GAMEPAD_A:
-            return kMacroGamepadOffset + 10;
-        case XINPUT_GAMEPAD_B:
-            return kMacroGamepadOffset + 11;
-        case XINPUT_GAMEPAD_X:
-            return kMacroGamepadOffset + 12;
-        case XINPUT_GAMEPAD_Y:
-            return kMacroGamepadOffset + 13;
-        case 0x9:
-            return kMacroGamepadOffset + 14;  // LT
-        case 0xA:
-            return kMacroGamepadOffset + 15;  // RT
-        default:
-            return kMaxMacros;
+        case kGamepadDpadUp:        return kMacroGamepadOffset;
+        case kGamepadDpadDown:      return kMacroGamepadOffset + 1;
+        case kGamepadDpadLeft:      return kMacroGamepadOffset + 2;
+        case kGamepadDpadRight:     return kMacroGamepadOffset + 3;
+        case kGamepadStart:         return kMacroGamepadOffset + 4;
+        case kGamepadBack:          return kMacroGamepadOffset + 5;
+        case kGamepadLeftThumb:     return kMacroGamepadOffset + 6;
+        case kGamepadRightThumb:    return kMacroGamepadOffset + 7;
+        case kGamepadLeftShoulder:  return kMacroGamepadOffset + 8;
+        case kGamepadRightShoulder: return kMacroGamepadOffset + 9;
+        case kGamepadA:             return kMacroGamepadOffset + 10;
+        case kGamepadB:             return kMacroGamepadOffset + 11;
+        case kGamepadX:             return kMacroGamepadOffset + 12;
+        case kGamepadY:             return kMacroGamepadOffset + 13;
+        case kGamepadLT:            return kMacroGamepadOffset + 14;
+        case kGamepadRT:            return kMacroGamepadOffset + 15;
+        default:                    return kMaxMacros;
         }
     }
 
@@ -260,45 +266,8 @@ namespace {
     bool IsKeyCurrentlyHeld(uint32_t macroKeyCode)
     {
         if (macroKeyCode == kKeyDisabled) return false;
-
-        if (macroKeyCode >= kMacroNumKeyboardKeys && macroKeyCode < kMacroGamepadOffset) {
-            int vk = 0;
-            switch (macroKeyCode) {
-            case 256: vk = VK_LBUTTON; break;
-            case 257: vk = VK_RBUTTON; break;
-            case 258: vk = VK_MBUTTON; break;
-            case 259: vk = VK_XBUTTON1; break;
-            case 260: vk = VK_XBUTTON2; break;
-            default: return false;
-            }
-            return (GetAsyncKeyState(vk) & 0x8000) != 0;
-        }
-
-        if (macroKeyCode >= kMacroGamepadOffset && macroKeyCode < kMaxMacros) {
-            XINPUT_STATE state{};
-            if (XInputGetState(0, &state) != ERROR_SUCCESS) return false;
-            switch (macroKeyCode) {
-            case 266: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP) != 0;
-            case 267: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
-            case 268: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
-            case 269: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
-            case 270: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_START) != 0;
-            case 271: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_BACK) != 0;
-            case 272: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
-            case 273: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
-            case 274: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
-            case 275: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
-            case 276: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
-            case 277: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
-            case 278: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_X) != 0;
-            case 279: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_Y) != 0;
-            case 280: return state.Gamepad.bLeftTrigger > 128;
-            case 281: return state.Gamepad.bRightTrigger > 128;
-            default: return false;
-            }
-        }
-
-        return false;
+        if (macroKeyCode >= kMaxMacros) return false;
+        return g_keyStates[macroKeyCode].load(std::memory_order_relaxed);
     }
 
     bool IsLeftHandValidForPowerAttack(PlayerCharacter* player)
@@ -335,39 +304,15 @@ namespace {
     bool IsModifierKeyPressed(uint32_t modifierKey)
     {
         if (modifierKey == kModifierNone) return true;
-
-        int vk = 0;
-        switch (modifierKey) {
-        case 42:  vk = VK_LSHIFT; break;
-        case 54:  vk = VK_RSHIFT; break;
-        case 29:  vk = VK_LCONTROL; break;
-        case 157: vk = VK_RCONTROL; break;
-        case 56:  vk = VK_LMENU; break;
-        case 184: vk = VK_RMENU; break;
-        default:  return false;
-        }
-
-        return (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (modifierKey >= kMaxMacros) return false;
+        return g_keyStates[modifierKey].load(std::memory_order_relaxed);
     }
 
     bool IsGamepadModifierPressed(uint32_t modifierKey)
     {
         if (modifierKey == kModifierNone) return true;
-
-        XINPUT_STATE state{};
-        if (XInputGetState(0, &state) != ERROR_SUCCESS) return false;
-
-        switch (modifierKey) {
-        case 272: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
-        case 273: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
-        case 274: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
-        case 275: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
-        case 276: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_A) != 0;
-        case 277: return (state.Gamepad.wButtons & XINPUT_GAMEPAD_B) != 0;
-        case 280: return state.Gamepad.bLeftTrigger > 128;
-        case 281: return state.Gamepad.bRightTrigger > 128;
-        default:  return false;
-        }
+        if (modifierKey >= kMaxMacros) return false;
+        return g_keyStates[modifierKey].load(std::memory_order_relaxed);
     }
 
     bool HandleBlockEvent(ButtonEvent* button, uint32_t keyCode)
@@ -472,6 +417,15 @@ namespace {
             }
 
             auto* button = event->AsButtonEvent();
+            if (!button) continue;
+
+            // Track all button states for modifier/held-key checks.
+            // This is controller-agnostic: works with Xbox, PS5, Switch, etc.
+            const uint32_t macroKey = ToMacroKeyCode(button);
+            if (macroKey < kMaxMacros) {
+                g_keyStates[macroKey].store(button->Value() != 0.0f, std::memory_order_relaxed);
+            }
+
             if (HandleButtonEvent(button) && mcoMode) {
                 button->GetRuntimeData().value = 0.0f;
             }
