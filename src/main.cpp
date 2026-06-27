@@ -91,7 +91,7 @@ namespace {
         { "Right Alt (184)", 184 }
     } };
 
-    constexpr std::array<KeyOption, 9> kGamepadModifierOptions{ {
+    constexpr std::array<KeyOption, 11> kGamepadModifierOptions{ {
         { "None (No modifier)", 0 },
         { "Left Shoulder / LB (274)", 274 },
         { "Right Shoulder / RB (275)", 275 },
@@ -99,6 +99,8 @@ namespace {
         { "Right Thumb / RS (273)", 273 },
         { "A (276)", 276 },
         { "B (277)", 277 },
+        { "X (278)", 278 },
+        { "Y (279)", 279 },
         { "Left Trigger / LT (280)", 280 },
         { "Right Trigger / RT (281)", 281 }
     } };
@@ -139,7 +141,6 @@ namespace {
     std::atomic<bool> g_pluginEnabled = true;
     bool g_pendingPluginEnabled = true;
     bool g_hasUnsavedEnabledChange = false;
-    float g_vanillaPowerAttackDelay = 0.0f;
     std::atomic<uint64_t> g_lastDualPATime = 0;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
@@ -345,21 +346,8 @@ namespace {
         return true;
     }
 
-    bool HandleButtonEvent(ButtonEvent* button)
+    bool TryPowerAttack(ButtonEvent* button, uint32_t keyCode)
     {
-        if (!button || !g_pluginEnabled.load()) {
-            return false;
-        }
-
-        const uint32_t keyCode = ToMacroKeyCode(button);
-
-        HandleBlockEvent(button, keyCode);
-
-        const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
-        if (!isDown) {
-            return false;
-        }
-
         const uint32_t rightKey = g_altPowerAttackKey.load();
         const uint32_t leftKey = g_altLeftPowerAttackKey.load();
         const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
@@ -408,9 +396,57 @@ namespace {
         return consumed;
     }
 
+    bool IsPowerAttackChordActive(ButtonEvent* button, uint32_t keyCode)
+    {
+        const uint32_t rightKey = g_altPowerAttackKey.load();
+        const uint32_t leftKey = g_altLeftPowerAttackKey.load();
+        const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
+        const bool isLeftKey = (leftKey != kKeyDisabled) && (keyCode == leftKey);
+        if (!isRightKey && !isLeftKey) return false;
+
+        const bool isGamepad = button->device.get() == INPUT_DEVICE::kGamepad;
+
+        if (isRightKey) {
+            const bool modPressed = isGamepad
+                ? IsGamepadModifierPressed(g_rightGamepadModifier.load())
+                : IsModifierKeyPressed(g_rightModifierKey.load());
+            if (modPressed) return true;
+        }
+
+        if (isLeftKey) {
+            const bool modPressed = isGamepad
+                ? IsGamepadModifierPressed(g_leftGamepadModifier.load())
+                : IsModifierKeyPressed(g_leftModifierKey.load());
+            if (modPressed) return true;
+        }
+
+        return false;
+    }
+
+    bool HandleButtonEvent(ButtonEvent* button)
+    {
+        if (!button || !g_pluginEnabled.load()) {
+            return false;
+        }
+
+        const uint32_t keyCode = ToMacroKeyCode(button);
+        const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
+
+        bool consumed = false;
+        if (isDown) {
+            consumed = TryPowerAttack(button, keyCode);
+        }
+
+        const bool suppressBlockStart = (button->Value() != 0.0f) && IsPowerAttackChordActive(button, keyCode);
+        if (!suppressBlockStart) {
+            HandleBlockEvent(button, keyCode);
+        }
+
+        return consumed;
+    }
+
     void ProcessInputChain(RE::InputEvent* events)
     {
-        const bool mcoMode = g_mcoMode.load();
         for (auto* event = events; event; event = event->next) {
             if (event->eventType.get() != INPUT_EVENT_TYPE::kButton) {
                 continue;
@@ -419,14 +455,12 @@ namespace {
             auto* button = event->AsButtonEvent();
             if (!button) continue;
 
-            // Track all button states for modifier/held-key checks.
-            // This is controller-agnostic: works with Xbox, PS5, Switch, etc.
             const uint32_t macroKey = ToMacroKeyCode(button);
             if (macroKey < kMaxMacros) {
                 g_keyStates[macroKey].store(button->Value() != 0.0f, std::memory_order_relaxed);
             }
 
-            if (HandleButtonEvent(button) && mcoMode) {
+            if (HandleButtonEvent(button)) {
                 button->GetRuntimeData().value = 0.0f;
             }
         }
@@ -515,14 +549,39 @@ namespace {
         return keyCode;
     }
 
-    void ApplyPluginEnabledState(bool enabled)
+    struct AttackBlockHook
     {
-        if (enabled) {
-            g_initialPowerAttackDelay->data.f = 10.0f;
-        } else {
-            g_initialPowerAttackDelay->data.f = g_vanillaPowerAttackDelay;
+        static void Install()
+        {
+            REL::Relocation<std::uintptr_t> vtbl{ VTABLE_AttackBlockHandler[0] };
+            _ProcessButton = reinterpret_cast<ProcessButton_t>(vtbl.write_vfunc(0x4, Hook_ProcessButton));
         }
-    }
+
+    private:
+        using ProcessButton_t = void (*)(AttackBlockHandler*, ButtonEvent*, PlayerControlsData*);
+
+        static void Hook_ProcessButton(AttackBlockHandler* a_this, ButtonEvent* a_event, PlayerControlsData* a_data)
+        {
+            if (a_event && g_pluginEnabled.load()) {
+                auto* userEvents = UserEvents::GetSingleton();
+                if (userEvents) {
+                    const auto& userEvent = a_event->GetUserEvent();
+                    const bool isAttackKey = (userEvent == userEvents->rightAttack) ||
+                                             (userEvent == userEvents->leftAttack);
+                    const float threshold = g_initialPowerAttackDelay->data.f;
+                    const bool isHeldPowerAttack = a_event->Value() != 0.0f &&
+                                                   a_event->HeldDuration() >= threshold;
+                    if (isAttackKey && isHeldPowerAttack) {
+                        return;
+                    }
+                }
+            }
+
+            _ProcessButton(a_this, a_event, a_data);
+        }
+
+        static inline ProcessButton_t _ProcessButton = nullptr;
+    };
 
     bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t blockKeyCode,
                      uint32_t rightMod, uint32_t leftMod,
@@ -802,7 +861,6 @@ namespace {
                 g_pluginEnabled = saveEnabled;
                 g_pendingPluginEnabled = saveEnabled;
                 g_hasUnsavedEnabledChange = false;
-                ApplyPluginEnabledState(saveEnabled);
             }
         }
 
@@ -876,7 +934,6 @@ namespace {
             g_pendingPluginEnabled = true;
             g_hasUnsavedEnabledChange = false;
             g_ini.Reset();
-            ApplyPluginEnabledState(true);
             return;
         }
 
@@ -942,7 +999,6 @@ namespace {
         g_hasUnsavedEnabledChange = false;
 
         g_ini.Reset();
-        ApplyPluginEnabledState(parsedEnabled);
         SKSE::log::info("Loaded config enabled={} right={} left={} block={} rmod={} lmod={} rgpmod={} lgpmod={} mco={} noStaminaPA={} from '{}'",
             parsedEnabled, parsedKey, parsedLeftKey, parsedBlockKey, parsedRMod, parsedLMod, parsedRGPMod, parsedLGPMod, parsedMco, parsedNoStamina, path);
     }
@@ -1078,7 +1134,7 @@ SKSEPluginLoad(const LoadInterface* skse)
             return;
         }
 
-        g_vanillaPowerAttackDelay = g_initialPowerAttackDelay->data.f;
+        AttackBlockHook::Install();
 
         LoadConfig();
 
