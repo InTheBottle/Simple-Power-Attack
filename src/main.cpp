@@ -549,6 +549,23 @@ namespace {
         return keyCode;
     }
 
+    bool IsMeleeWeaponInHand(PlayerCharacter* player, bool leftHand)
+    {
+        if (!player) return false;
+
+        auto* actorState = player->AsActorState();
+        if (!actorState || actorState->GetWeaponState() != WEAPON_STATE::kDrawn) return false;
+
+        TESForm* obj = player->GetEquippedObject(leftHand);
+        if (!obj) return false;
+
+        auto* weap = skyrim_cast<TESObjectWEAP*>(obj);
+        if (!weap) return false;
+        if (weap->IsBow() || weap->IsCrossbow() || weap->IsStaff()) return false;
+
+        return true;
+    }
+
     struct AttackBlockHook
     {
         static void Install()
@@ -566,12 +583,13 @@ namespace {
                 auto* userEvents = UserEvents::GetSingleton();
                 if (userEvents) {
                     const auto& userEvent = a_event->GetUserEvent();
-                    const bool isAttackKey = (userEvent == userEvents->rightAttack) ||
-                                             (userEvent == userEvents->leftAttack);
+                    const bool isLeftAttack = (userEvent == userEvents->leftAttack);
+                    const bool isAttackKey = isLeftAttack || (userEvent == userEvents->rightAttack);
                     const float threshold = g_initialPowerAttackDelay->data.f;
-                    const bool isHeldPowerAttack = a_event->Value() != 0.0f &&
-                                                   a_event->HeldDuration() >= threshold;
-                    if (isAttackKey && isHeldPowerAttack) {
+                    const float held = a_event->HeldDuration();
+                    const bool isHeldPowerAttack = a_event->Value() != 0.0f && held > 0.0f && held >= threshold;
+                    if (isAttackKey && isHeldPowerAttack &&
+                        IsMeleeWeaponInHand(PlayerCharacter::GetSingleton(), isLeftAttack)) {
                         return;
                     }
                 }
