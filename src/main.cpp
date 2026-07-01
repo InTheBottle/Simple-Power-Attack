@@ -120,18 +120,27 @@ namespace {
     std::atomic<uint32_t> g_altBlockKey = kKeyDisabled;
     uint32_t g_pendingAltBlockKey = kKeyDisabled;
     bool g_hasUnsavedBlockKeyChange = false;
+    std::atomic<uint32_t> g_altDualPowerAttackKey = kKeyDisabled;
+    uint32_t g_pendingAltDualPowerAttackKey = kKeyDisabled;
+    bool g_hasUnsavedDualKeyChange = false;
     std::atomic<uint32_t> g_rightModifierKey = kModifierNone;
     uint32_t g_pendingRightModifierKey = kModifierNone;
     bool g_hasUnsavedRightModChange = false;
     std::atomic<uint32_t> g_leftModifierKey = kModifierNone;
     uint32_t g_pendingLeftModifierKey = kModifierNone;
     bool g_hasUnsavedLeftModChange = false;
+    std::atomic<uint32_t> g_dualModifierKey = kModifierNone;
+    uint32_t g_pendingDualModifierKey = kModifierNone;
+    bool g_hasUnsavedDualModChange = false;
     std::atomic<uint32_t> g_rightGamepadModifier = kModifierNone;
     uint32_t g_pendingRightGamepadModifier = kModifierNone;
     bool g_hasUnsavedRightGPModChange = false;
     std::atomic<uint32_t> g_leftGamepadModifier = kModifierNone;
     uint32_t g_pendingLeftGamepadModifier = kModifierNone;
     bool g_hasUnsavedLeftGPModChange = false;
+    std::atomic<uint32_t> g_dualGamepadModifier = kModifierNone;
+    uint32_t g_pendingDualGamepadModifier = kModifierNone;
+    bool g_hasUnsavedDualGPModChange = false;
     std::atomic<bool> g_mcoMode = false;
     bool g_pendingMcoMode = false;
     bool g_hasUnsavedMcoChange = false;
@@ -141,7 +150,6 @@ namespace {
     std::atomic<bool> g_pluginEnabled = true;
     bool g_pendingPluginEnabled = true;
     bool g_hasUnsavedEnabledChange = false;
-    std::atomic<uint64_t> g_lastDualPATime = 0;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
 
@@ -264,13 +272,6 @@ namespace {
         return isOneHandedMelee(rightWeap) && isOneHandedMelee(leftWeap);
     }
 
-    bool IsKeyCurrentlyHeld(uint32_t macroKeyCode)
-    {
-        if (macroKeyCode == kKeyDisabled) return false;
-        if (macroKeyCode >= kMaxMacros) return false;
-        return g_keyStates[macroKeyCode].load(std::memory_order_relaxed);
-    }
-
     bool IsLeftHandValidForPowerAttack(PlayerCharacter* player)
     {
         TESForm* leftObj = player->GetEquippedObject(true);
@@ -350,9 +351,11 @@ namespace {
     {
         const uint32_t rightKey = g_altPowerAttackKey.load();
         const uint32_t leftKey = g_altLeftPowerAttackKey.load();
+        const uint32_t dualKey = g_altDualPowerAttackKey.load();
         const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
         const bool isLeftKey = (leftKey != kKeyDisabled) && (keyCode == leftKey);
-        if (!isRightKey && !isLeftKey) return false;
+        const bool isDualKey = (dualKey != kKeyDisabled) && (keyCode == dualKey);
+        if (!isRightKey && !isLeftKey && !isDualKey) return false;
 
         auto* player = PlayerCharacter::GetSingleton();
         if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
@@ -364,18 +367,22 @@ namespace {
         const bool isGamepad = button->device.get() == INPUT_DEVICE::kGamepad;
         bool consumed = false;
 
-        if (isRightKey) {
+        if (isDualKey) {
+            const bool modPressed = isGamepad
+                ? IsGamepadModifierPressed(g_dualGamepadModifier.load())
+                : IsModifierKeyPressed(g_dualModifierKey.load());
+            if (g_dualPowerAttackAction && modPressed && IsDualWielding(player)) {
+                TriggerDualPowerAttack(player);
+                consumed = true;
+            }
+        }
+
+        if (isRightKey && !consumed) {
             const bool modPressed = isGamepad
                 ? IsGamepadModifierPressed(g_rightGamepadModifier.load())
                 : IsModifierKeyPressed(g_rightModifierKey.load());
             if (modPressed) {
-                if (g_dualPowerAttackAction && leftKey != kKeyDisabled &&
-                    IsKeyCurrentlyHeld(leftKey) && IsDualWielding(player)) {
-                    TriggerDualPowerAttack(player);
-                    g_lastDualPATime.store(GetTickCount64());
-                } else {
-                    TriggerPowerAttack(player);
-                }
+                TriggerPowerAttack(player);
                 consumed = true;
             }
         }
@@ -385,10 +392,7 @@ namespace {
                 ? IsGamepadModifierPressed(g_leftGamepadModifier.load())
                 : IsModifierKeyPressed(g_leftModifierKey.load());
             if (IsLeftHandValidForPowerAttack(player) && modPressed) {
-                const uint64_t elapsed = GetTickCount64() - g_lastDualPATime.load();
-                if (elapsed > 200) {
-                    TriggerLeftPowerAttack(player);
-                }
+                TriggerLeftPowerAttack(player);
                 consumed = true;
             }
         }
@@ -400,11 +404,20 @@ namespace {
     {
         const uint32_t rightKey = g_altPowerAttackKey.load();
         const uint32_t leftKey = g_altLeftPowerAttackKey.load();
+        const uint32_t dualKey = g_altDualPowerAttackKey.load();
         const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
         const bool isLeftKey = (leftKey != kKeyDisabled) && (keyCode == leftKey);
-        if (!isRightKey && !isLeftKey) return false;
+        const bool isDualKey = (dualKey != kKeyDisabled) && (keyCode == dualKey);
+        if (!isRightKey && !isLeftKey && !isDualKey) return false;
 
         const bool isGamepad = button->device.get() == INPUT_DEVICE::kGamepad;
+
+        if (isDualKey) {
+            const bool modPressed = isGamepad
+                ? IsGamepadModifierPressed(g_dualGamepadModifier.load())
+                : IsModifierKeyPressed(g_dualModifierKey.load());
+            if (modPressed) return true;
+        }
 
         if (isRightKey) {
             const bool modPressed = isGamepad
@@ -601,18 +614,21 @@ namespace {
         static inline ProcessButton_t _ProcessButton = nullptr;
     };
 
-    bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t blockKeyCode,
-                     uint32_t rightMod, uint32_t leftMod,
-                     uint32_t rightGPMod, uint32_t leftGPMod,
+    bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t blockKeyCode, uint32_t dualKeyCode,
+                     uint32_t rightMod, uint32_t leftMod, uint32_t dualMod,
+                     uint32_t rightGPMod, uint32_t leftGPMod, uint32_t dualGPMod,
                      bool mcoMode, bool noStaminaPA, bool pluginEnabled)
     {
         keyCode = SanitizeKeyCode(keyCode);
         leftKeyCode = SanitizeKeyCode(leftKeyCode);
         blockKeyCode = SanitizeKeyCode(blockKeyCode);
+        dualKeyCode = SanitizeKeyCode(dualKeyCode);
         rightMod = SanitizeModifierKeyCode(rightMod);
         leftMod = SanitizeModifierKeyCode(leftMod);
+        dualMod = SanitizeModifierKeyCode(dualMod);
         rightGPMod = SanitizeGamepadModifierCode(rightGPMod);
         leftGPMod = SanitizeGamepadModifierCode(leftGPMod);
+        dualGPMod = SanitizeGamepadModifierCode(dualGPMod);
         const std::string savePath = GetPrimaryConfigPath();
 
         g_ini.Reset();
@@ -620,10 +636,13 @@ namespace {
         g_ini.SetLongValue("General", "iKeycode", static_cast<long>(keyCode));
         g_ini.SetLongValue("General", "iLeftKeycode", static_cast<long>(leftKeyCode));
         g_ini.SetLongValue("General", "iBlockKeycode", static_cast<long>(blockKeyCode));
+        g_ini.SetLongValue("General", "iDualKeycode", static_cast<long>(dualKeyCode));
         g_ini.SetLongValue("General", "iRightModifier", static_cast<long>(rightMod));
         g_ini.SetLongValue("General", "iLeftModifier", static_cast<long>(leftMod));
+        g_ini.SetLongValue("General", "iDualModifier", static_cast<long>(dualMod));
         g_ini.SetLongValue("General", "iRightGamepadModifier", static_cast<long>(rightGPMod));
         g_ini.SetLongValue("General", "iLeftGamepadModifier", static_cast<long>(leftGPMod));
+        g_ini.SetLongValue("General", "iDualGamepadModifier", static_cast<long>(dualGPMod));
         g_ini.SetBoolValue("MCO", "bMCOMode", mcoMode);
         g_ini.SetBoolValue("General", "bPowerAttackNoStamina", noStaminaPA);
 
@@ -644,8 +663,8 @@ namespace {
             return false;
         }
 
-        SKSE::log::info("Saved config enabled={} right={} left={} block={} rmod={} lmod={} rgmod={} lgmod={} mco={} noStaminaPA={} to '{}'",
-            pluginEnabled, keyCode, leftKeyCode, blockKeyCode, rightMod, leftMod, rightGPMod, leftGPMod, mcoMode, noStaminaPA, savePath);
+        SKSE::log::info("Saved config enabled={} right={} left={} block={} dual={} rmod={} lmod={} dmod={} rgmod={} lgmod={} dgmod={} mco={} noStaminaPA={} to '{}'",
+            pluginEnabled, keyCode, leftKeyCode, blockKeyCode, dualKeyCode, rightMod, leftMod, dualMod, rightGPMod, leftGPMod, dualGPMod, mcoMode, noStaminaPA, savePath);
         return true;
     }
 
@@ -689,14 +708,20 @@ namespace {
         const uint32_t pendingLeftCode = g_pendingAltLeftPowerAttackKey;
         const uint32_t currentBlockCode = g_altBlockKey.load();
         const uint32_t pendingBlockCode = g_pendingAltBlockKey;
+        const uint32_t currentDualCode = g_altDualPowerAttackKey.load();
+        const uint32_t pendingDualCode = g_pendingAltDualPowerAttackKey;
         const uint32_t currentRMod = g_rightModifierKey.load();
         const uint32_t pendingRMod = g_pendingRightModifierKey;
         const uint32_t currentLMod = g_leftModifierKey.load();
         const uint32_t pendingLMod = g_pendingLeftModifierKey;
+        const uint32_t currentDMod = g_dualModifierKey.load();
+        const uint32_t pendingDMod = g_pendingDualModifierKey;
         const uint32_t currentRGPMod = g_rightGamepadModifier.load();
         const uint32_t pendingRGPMod = g_pendingRightGamepadModifier;
         const uint32_t currentLGPMod = g_leftGamepadModifier.load();
         const uint32_t pendingLGPMod = g_pendingLeftGamepadModifier;
+        const uint32_t currentDGPMod = g_dualGamepadModifier.load();
+        const uint32_t pendingDGPMod = g_pendingDualGamepadModifier;
         const bool currentMco = g_mcoMode.load();
         bool pendingMco = g_pendingMcoMode;
         const bool currentNoStamina = g_noStaminaPowerAttack.load();
@@ -710,20 +735,26 @@ namespace {
         uint32_t chosenCode = pendingCode;
         uint32_t chosenLeftCode = pendingLeftCode;
         uint32_t chosenBlockCode = pendingBlockCode;
+        uint32_t chosenDualCode = pendingDualCode;
         uint32_t chosenRMod = pendingRMod;
         uint32_t chosenLMod = pendingLMod;
+        uint32_t chosenDMod = pendingDMod;
         uint32_t chosenRGPMod = pendingRGPMod;
         uint32_t chosenLGPMod = pendingLGPMod;
+        uint32_t chosenDGPMod = pendingDGPMod;
         bool chosenMco = pendingMco;
         bool chosenNoStamina = pendingNoStamina;
         bool chosenEnabled = pendingEnabled;
         bool changed = false;
         bool leftChanged = false;
         bool blockChanged = false;
+        bool dualChanged = false;
         bool rModChanged = false;
         bool lModChanged = false;
+        bool dModChanged = false;
         bool rGPModChanged = false;
         bool lGPModChanged = false;
+        bool dGPModChanged = false;
         bool mcoChanged = false;
         bool noStaminaChanged = false;
         bool enabledChanged = false;
@@ -740,6 +771,11 @@ namespace {
             lModChanged = DrawKeyOptionCombo("Modifier##mk_lmod", kModifierOptions, pendingLMod, chosenLMod) || lModChanged;
 
             ImGuiMCP::Separator();
+            ImGuiMCP::Text("Dual Power Attack");
+            dualChanged = DrawKeyOptionCombo("Key##mk_dual", kMouseOptions, pendingDualCode, chosenDualCode) || dualChanged;
+            dModChanged = DrawKeyOptionCombo("Modifier##mk_dmod", kModifierOptions, pendingDMod, chosenDMod) || dModChanged;
+
+            ImGuiMCP::Separator();
             ImGuiMCP::Text("Block");
             blockChanged = DrawKeyOptionCombo("Key##mk_block", kMouseOptions, pendingBlockCode, chosenBlockCode) || blockChanged;
         }
@@ -754,6 +790,11 @@ namespace {
             ImGuiMCP::Text("Left Power Attack");
             leftChanged = DrawKeyOptionCombo("Button##gp_left", kGamepadOptions, pendingLeftCode, chosenLeftCode) || leftChanged;
             lGPModChanged = DrawKeyOptionCombo("Modifier##gp_lmod", kGamepadModifierOptions, pendingLGPMod, chosenLGPMod) || lGPModChanged;
+
+            ImGuiMCP::Separator();
+            ImGuiMCP::Text("Dual Power Attack");
+            dualChanged = DrawKeyOptionCombo("Button##gp_dual", kGamepadOptions, pendingDualCode, chosenDualCode) || dualChanged;
+            dGPModChanged = DrawKeyOptionCombo("Modifier##gp_dmod", kGamepadModifierOptions, pendingDGPMod, chosenDGPMod) || dGPModChanged;
 
             ImGuiMCP::Separator();
             ImGuiMCP::Text("Block");
@@ -791,6 +832,11 @@ namespace {
             g_hasUnsavedBlockKeyChange = (g_pendingAltBlockKey != currentBlockCode);
         }
 
+        if (dualChanged) {
+            g_pendingAltDualPowerAttackKey = SanitizeKeyCode(chosenDualCode);
+            g_hasUnsavedDualKeyChange = (g_pendingAltDualPowerAttackKey != currentDualCode);
+        }
+
         if (rModChanged) {
             g_pendingRightModifierKey = SanitizeModifierKeyCode(chosenRMod);
             g_hasUnsavedRightModChange = (g_pendingRightModifierKey != currentRMod);
@@ -801,6 +847,11 @@ namespace {
             g_hasUnsavedLeftModChange = (g_pendingLeftModifierKey != currentLMod);
         }
 
+        if (dModChanged) {
+            g_pendingDualModifierKey = SanitizeModifierKeyCode(chosenDMod);
+            g_hasUnsavedDualModChange = (g_pendingDualModifierKey != currentDMod);
+        }
+
         if (rGPModChanged) {
             g_pendingRightGamepadModifier = SanitizeGamepadModifierCode(chosenRGPMod);
             g_hasUnsavedRightGPModChange = (g_pendingRightGamepadModifier != currentRGPMod);
@@ -809,6 +860,11 @@ namespace {
         if (lGPModChanged) {
             g_pendingLeftGamepadModifier = SanitizeGamepadModifierCode(chosenLGPMod);
             g_hasUnsavedLeftGPModChange = (g_pendingLeftGamepadModifier != currentLGPMod);
+        }
+
+        if (dGPModChanged) {
+            g_pendingDualGamepadModifier = SanitizeGamepadModifierCode(chosenDGPMod);
+            g_hasUnsavedDualGPModChange = (g_pendingDualGamepadModifier != currentDGPMod);
         }
 
         if (mcoChanged) {
@@ -827,8 +883,9 @@ namespace {
         }
 
         const bool hasUnsaved = g_hasUnsavedKeyChange || g_hasUnsavedLeftKeyChange ||
-            g_hasUnsavedBlockKeyChange || g_hasUnsavedRightModChange || g_hasUnsavedLeftModChange ||
-            g_hasUnsavedRightGPModChange || g_hasUnsavedLeftGPModChange ||
+            g_hasUnsavedBlockKeyChange || g_hasUnsavedDualKeyChange ||
+            g_hasUnsavedRightModChange || g_hasUnsavedLeftModChange || g_hasUnsavedDualModChange ||
+            g_hasUnsavedRightGPModChange || g_hasUnsavedLeftGPModChange || g_hasUnsavedDualGPModChange ||
             g_hasUnsavedMcoChange || g_hasUnsavedNoStaminaChange || g_hasUnsavedEnabledChange;
 
         ImGuiMCP::Separator();
@@ -841,14 +898,17 @@ namespace {
             const uint32_t saveCode = SanitizeKeyCode(g_pendingAltPowerAttackKey);
             const uint32_t saveLeftCode = SanitizeKeyCode(g_pendingAltLeftPowerAttackKey);
             const uint32_t saveBlockCode = SanitizeKeyCode(g_pendingAltBlockKey);
+            const uint32_t saveDualCode = SanitizeKeyCode(g_pendingAltDualPowerAttackKey);
             const uint32_t saveRMod = SanitizeModifierKeyCode(g_pendingRightModifierKey);
             const uint32_t saveLMod = SanitizeModifierKeyCode(g_pendingLeftModifierKey);
+            const uint32_t saveDMod = SanitizeModifierKeyCode(g_pendingDualModifierKey);
             const uint32_t saveRGPMod = SanitizeGamepadModifierCode(g_pendingRightGamepadModifier);
             const uint32_t saveLGPMod = SanitizeGamepadModifierCode(g_pendingLeftGamepadModifier);
+            const uint32_t saveDGPMod = SanitizeGamepadModifierCode(g_pendingDualGamepadModifier);
             const bool saveMco = g_pendingMcoMode;
             const bool saveNoStamina = g_pendingNoStaminaPowerAttack;
             const bool saveEnabled = g_pendingPluginEnabled;
-            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveRMod, saveLMod, saveRGPMod, saveLGPMod, saveMco, saveNoStamina, saveEnabled)) {
+            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveDualCode, saveRMod, saveLMod, saveDMod, saveRGPMod, saveLGPMod, saveDGPMod, saveMco, saveNoStamina, saveEnabled)) {
                 g_altPowerAttackKey = saveCode;
                 g_pendingAltPowerAttackKey = saveCode;
                 g_hasUnsavedKeyChange = false;
@@ -858,18 +918,27 @@ namespace {
                 g_altBlockKey = saveBlockCode;
                 g_pendingAltBlockKey = saveBlockCode;
                 g_hasUnsavedBlockKeyChange = false;
+                g_altDualPowerAttackKey = saveDualCode;
+                g_pendingAltDualPowerAttackKey = saveDualCode;
+                g_hasUnsavedDualKeyChange = false;
                 g_rightModifierKey = saveRMod;
                 g_pendingRightModifierKey = saveRMod;
                 g_hasUnsavedRightModChange = false;
                 g_leftModifierKey = saveLMod;
                 g_pendingLeftModifierKey = saveLMod;
                 g_hasUnsavedLeftModChange = false;
+                g_dualModifierKey = saveDMod;
+                g_pendingDualModifierKey = saveDMod;
+                g_hasUnsavedDualModChange = false;
                 g_rightGamepadModifier = saveRGPMod;
                 g_pendingRightGamepadModifier = saveRGPMod;
                 g_hasUnsavedRightGPModChange = false;
                 g_leftGamepadModifier = saveLGPMod;
                 g_pendingLeftGamepadModifier = saveLGPMod;
                 g_hasUnsavedLeftGPModChange = false;
+                g_dualGamepadModifier = saveDGPMod;
+                g_pendingDualGamepadModifier = saveDGPMod;
+                g_hasUnsavedDualGPModChange = false;
                 g_mcoMode = saveMco;
                 g_pendingMcoMode = saveMco;
                 g_hasUnsavedMcoChange = false;
@@ -891,14 +960,20 @@ namespace {
             g_hasUnsavedLeftKeyChange = false;
             g_pendingAltBlockKey = currentBlockCode;
             g_hasUnsavedBlockKeyChange = false;
+            g_pendingAltDualPowerAttackKey = currentDualCode;
+            g_hasUnsavedDualKeyChange = false;
             g_pendingRightModifierKey = currentRMod;
             g_hasUnsavedRightModChange = false;
             g_pendingLeftModifierKey = currentLMod;
             g_hasUnsavedLeftModChange = false;
+            g_pendingDualModifierKey = currentDMod;
+            g_hasUnsavedDualModChange = false;
             g_pendingRightGamepadModifier = currentRGPMod;
             g_hasUnsavedRightGPModChange = false;
             g_pendingLeftGamepadModifier = currentLGPMod;
             g_hasUnsavedLeftGPModChange = false;
+            g_pendingDualGamepadModifier = currentDGPMod;
+            g_hasUnsavedDualGPModChange = false;
             g_pendingMcoMode = currentMco;
             g_hasUnsavedMcoChange = false;
             g_pendingNoStaminaPowerAttack = currentNoStamina;
@@ -930,18 +1005,27 @@ namespace {
             g_altBlockKey = kKeyDisabled;
             g_pendingAltBlockKey = kKeyDisabled;
             g_hasUnsavedBlockKeyChange = false;
+            g_altDualPowerAttackKey = kKeyDisabled;
+            g_pendingAltDualPowerAttackKey = kKeyDisabled;
+            g_hasUnsavedDualKeyChange = false;
             g_rightModifierKey = kModifierNone;
             g_pendingRightModifierKey = kModifierNone;
             g_hasUnsavedRightModChange = false;
             g_leftModifierKey = kModifierNone;
             g_pendingLeftModifierKey = kModifierNone;
             g_hasUnsavedLeftModChange = false;
+            g_dualModifierKey = kModifierNone;
+            g_pendingDualModifierKey = kModifierNone;
+            g_hasUnsavedDualModChange = false;
             g_rightGamepadModifier = kModifierNone;
             g_pendingRightGamepadModifier = kModifierNone;
             g_hasUnsavedRightGPModChange = false;
             g_leftGamepadModifier = kModifierNone;
             g_pendingLeftGamepadModifier = kModifierNone;
             g_hasUnsavedLeftGPModChange = false;
+            g_dualGamepadModifier = kModifierNone;
+            g_pendingDualGamepadModifier = kModifierNone;
+            g_hasUnsavedDualGPModChange = false;
             g_mcoMode = false;
             g_pendingMcoMode = false;
             g_hasUnsavedMcoChange = false;
@@ -975,6 +1059,13 @@ namespace {
         g_pendingAltBlockKey = parsedBlockKey;
         g_hasUnsavedBlockKeyChange = false;
 
+        const long rawDualValue = g_ini.GetLongValue("General", "iDualKeycode", static_cast<long>(kKeyDisabled));
+        uint32_t parsedDualKey = SanitizeKeyCode(static_cast<uint32_t>(rawDualValue < 0 ? 0 : rawDualValue));
+
+        g_altDualPowerAttackKey = parsedDualKey;
+        g_pendingAltDualPowerAttackKey = parsedDualKey;
+        g_hasUnsavedDualKeyChange = false;
+
         const long rawRMod = g_ini.GetLongValue("General", "iRightModifier", static_cast<long>(kModifierNone));
         uint32_t parsedRMod = SanitizeModifierKeyCode(static_cast<uint32_t>(rawRMod < 0 ? 0 : rawRMod));
 
@@ -988,6 +1079,13 @@ namespace {
         g_pendingLeftModifierKey = parsedLMod;
         g_hasUnsavedLeftModChange = false;
 
+        const long rawDMod = g_ini.GetLongValue("General", "iDualModifier", static_cast<long>(kModifierNone));
+        uint32_t parsedDMod = SanitizeModifierKeyCode(static_cast<uint32_t>(rawDMod < 0 ? 0 : rawDMod));
+
+        g_dualModifierKey = parsedDMod;
+        g_pendingDualModifierKey = parsedDMod;
+        g_hasUnsavedDualModChange = false;
+
         const long rawRGPMod = g_ini.GetLongValue("General", "iRightGamepadModifier", static_cast<long>(kModifierNone));
         uint32_t parsedRGPMod = SanitizeGamepadModifierCode(static_cast<uint32_t>(rawRGPMod < 0 ? 0 : rawRGPMod));
 
@@ -1000,6 +1098,13 @@ namespace {
         g_leftGamepadModifier = parsedLGPMod;
         g_pendingLeftGamepadModifier = parsedLGPMod;
         g_hasUnsavedLeftGPModChange = false;
+
+        const long rawDGPMod = g_ini.GetLongValue("General", "iDualGamepadModifier", static_cast<long>(kModifierNone));
+        uint32_t parsedDGPMod = SanitizeGamepadModifierCode(static_cast<uint32_t>(rawDGPMod < 0 ? 0 : rawDGPMod));
+
+        g_dualGamepadModifier = parsedDGPMod;
+        g_pendingDualGamepadModifier = parsedDGPMod;
+        g_hasUnsavedDualGPModChange = false;
 
         const bool parsedMco = g_ini.GetBoolValue("MCO", "bMCOMode", false);
         g_mcoMode = parsedMco;
@@ -1017,8 +1122,8 @@ namespace {
         g_hasUnsavedEnabledChange = false;
 
         g_ini.Reset();
-        SKSE::log::info("Loaded config enabled={} right={} left={} block={} rmod={} lmod={} rgpmod={} lgpmod={} mco={} noStaminaPA={} from '{}'",
-            parsedEnabled, parsedKey, parsedLeftKey, parsedBlockKey, parsedRMod, parsedLMod, parsedRGPMod, parsedLGPMod, parsedMco, parsedNoStamina, path);
+        SKSE::log::info("Loaded config enabled={} right={} left={} block={} dual={} rmod={} lmod={} dmod={} rgpmod={} lgpmod={} dgpmod={} mco={} noStaminaPA={} from '{}'",
+            parsedEnabled, parsedKey, parsedLeftKey, parsedBlockKey, parsedDualKey, parsedRMod, parsedLMod, parsedDMod, parsedRGPMod, parsedLGPMod, parsedDGPMod, parsedMco, parsedNoStamina, path);
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
@@ -1044,6 +1149,10 @@ namespace {
                 g_pendingAltBlockKey = g_altBlockKey.load();
                 g_hasUnsavedBlockKeyChange = false;
             }
+            if (g_hasUnsavedDualKeyChange) {
+                g_pendingAltDualPowerAttackKey = g_altDualPowerAttackKey.load();
+                g_hasUnsavedDualKeyChange = false;
+            }
             if (g_hasUnsavedRightModChange) {
                 g_pendingRightModifierKey = g_rightModifierKey.load();
                 g_hasUnsavedRightModChange = false;
@@ -1052,6 +1161,10 @@ namespace {
                 g_pendingLeftModifierKey = g_leftModifierKey.load();
                 g_hasUnsavedLeftModChange = false;
             }
+            if (g_hasUnsavedDualModChange) {
+                g_pendingDualModifierKey = g_dualModifierKey.load();
+                g_hasUnsavedDualModChange = false;
+            }
             if (g_hasUnsavedRightGPModChange) {
                 g_pendingRightGamepadModifier = g_rightGamepadModifier.load();
                 g_hasUnsavedRightGPModChange = false;
@@ -1059,6 +1172,10 @@ namespace {
             if (g_hasUnsavedLeftGPModChange) {
                 g_pendingLeftGamepadModifier = g_leftGamepadModifier.load();
                 g_hasUnsavedLeftGPModChange = false;
+            }
+            if (g_hasUnsavedDualGPModChange) {
+                g_pendingDualGamepadModifier = g_dualGamepadModifier.load();
+                g_hasUnsavedDualGPModChange = false;
             }
             if (g_hasUnsavedMcoChange) {
                 g_pendingMcoMode = g_mcoMode.load();
@@ -1167,7 +1284,7 @@ SKSEPluginLoad(const LoadInterface* skse)
         }
 
 
-        SKSE::log::info("Initialized — right keycode={}, left keycode={}, block keycode={}", g_altPowerAttackKey.load(), g_altLeftPowerAttackKey.load(), g_altBlockKey.load());
+        SKSE::log::info("Initialized — right keycode={}, left keycode={}, dual keycode={}, block keycode={}", g_altPowerAttackKey.load(), g_altLeftPowerAttackKey.load(), g_altDualPowerAttackKey.load(), g_altBlockKey.load());
     });
     return true;
 }
