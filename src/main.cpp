@@ -32,7 +32,6 @@ namespace {
         kRightKey,
         kLeftKey,
         kDualKey,
-        kBlockKey,
         kRightMod,
         kLeftMod,
         kDualMod,
@@ -70,9 +69,6 @@ namespace {
     std::atomic<uint32_t> g_altLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
     uint32_t g_pendingAltLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
     bool g_hasUnsavedLeftKeyChange = false;
-    std::atomic<uint32_t> g_altBlockKey = kKeyDisabled;
-    uint32_t g_pendingAltBlockKey = kKeyDisabled;
-    bool g_hasUnsavedBlockKeyChange = false;
     std::atomic<uint32_t> g_altDualPowerAttackKey = kKeyDisabled;
     uint32_t g_pendingAltDualPowerAttackKey = kKeyDisabled;
     bool g_hasUnsavedDualKeyChange = false;
@@ -260,36 +256,6 @@ namespace {
         return g_keyStates[modifierKey].load(std::memory_order_relaxed);
     }
 
-    bool HandleBlockEvent(ButtonEvent* button, uint32_t keyCode)
-    {
-        const uint32_t blockKey = g_altBlockKey.load();
-        if (blockKey == kKeyDisabled || keyCode != blockKey) return false;
-
-        auto* player = PlayerCharacter::GetSingleton();
-        if (!player) return false;
-
-        auto* actorState = player->AsActorState();
-        if (!actorState) return false;
-
-        if (!IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
-
-        if (button->IsPressed()) {
-            actorState->actorState2.wantBlocking = 1;
-            bool isBlocking = false;
-            if (player->GetGraphVariableBool("IsBlocking", isBlocking) && !isBlocking) {
-                player->NotifyAnimationGraph("blockStart");
-            }
-        } else if (button->IsUp()) {
-            actorState->actorState2.wantBlocking = 0;
-            bool isBlocking = false;
-            if (player->GetGraphVariableBool("IsBlocking", isBlocking) && isBlocking) {
-                player->NotifyAnimationGraph("blockStop");
-            }
-        }
-
-        return true;
-    }
-
     bool TryPowerAttack(uint32_t keyCode)
     {
         const uint32_t rightKey = g_altPowerAttackKey.load();
@@ -333,22 +299,6 @@ namespace {
         return consumed;
     }
 
-    bool IsPowerAttackChordActive(uint32_t keyCode)
-    {
-        const uint32_t rightKey = g_altPowerAttackKey.load();
-        const uint32_t leftKey = g_altLeftPowerAttackKey.load();
-        const uint32_t dualKey = g_altDualPowerAttackKey.load();
-        const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
-        const bool isLeftKey = (leftKey != kKeyDisabled) && (keyCode == leftKey);
-        const bool isDualKey = (dualKey != kKeyDisabled) && (keyCode == dualKey);
-        if (!isRightKey && !isLeftKey && !isDualKey) return false;
-
-        if (isDualKey && IsModifierHeld(g_dualModifier.load())) return true;
-        if (isRightKey && IsModifierHeld(g_rightModifier.load())) return true;
-        if (isLeftKey && IsModifierHeld(g_leftModifier.load())) return true;
-
-        return false;
-    }
     void HandleCaptureInput(uint32_t macroKey)
     {
         if (macroKey == kEscapeScancode) {
@@ -368,17 +318,7 @@ namespace {
         const uint32_t keyCode = ToMacroKeyCode(button);
         const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
 
-        bool consumed = false;
-        if (isDown) {
-            consumed = TryPowerAttack(keyCode);
-        }
-
-        const bool suppressBlockStart = (button->Value() != 0.0f) && IsPowerAttackChordActive(keyCode);
-        if (!suppressBlockStart) {
-            HandleBlockEvent(button, keyCode);
-        }
-
-        return consumed;
+        return isDown && TryPowerAttack(keyCode);
     }
 
     void ProcessInputChain(RE::InputEvent* events)
@@ -540,13 +480,12 @@ namespace {
         static inline ProcessButton_t _ProcessButton = nullptr;
     };
 
-    bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t blockKeyCode, uint32_t dualKeyCode,
+    bool SaveConfig(uint32_t keyCode, uint32_t leftKeyCode, uint32_t dualKeyCode,
                      uint32_t rightMod, uint32_t leftMod, uint32_t dualMod,
                      bool mcoMode, bool noStaminaPA, bool pluginEnabled)
     {
         keyCode = SanitizeKeyCode(keyCode);
         leftKeyCode = SanitizeKeyCode(leftKeyCode);
-        blockKeyCode = SanitizeKeyCode(blockKeyCode);
         dualKeyCode = SanitizeKeyCode(dualKeyCode);
         rightMod = SanitizeUnifiedModifier(rightMod);
         leftMod = SanitizeUnifiedModifier(leftMod);
@@ -557,7 +496,6 @@ namespace {
         g_ini.SetBoolValue("General", "bEnabled", pluginEnabled);
         g_ini.SetLongValue("General", "iKeycode", static_cast<long>(keyCode));
         g_ini.SetLongValue("General", "iLeftKeycode", static_cast<long>(leftKeyCode));
-        g_ini.SetLongValue("General", "iBlockKeycode", static_cast<long>(blockKeyCode));
         g_ini.SetLongValue("General", "iDualKeycode", static_cast<long>(dualKeyCode));
         g_ini.SetLongValue("General", "iRightMod", static_cast<long>(rightMod));
         g_ini.SetLongValue("General", "iLeftMod", static_cast<long>(leftMod));
@@ -582,8 +520,8 @@ namespace {
             return false;
         }
 
-        SKSE::log::info("Saved config enabled={} right={} left={} block={} dual={} rmod={} lmod={} dmod={} mco={} noStaminaPA={} to '{}'",
-            pluginEnabled, keyCode, leftKeyCode, blockKeyCode, dualKeyCode, rightMod, leftMod, dualMod, mcoMode, noStaminaPA, savePath);
+        SKSE::log::info("Saved config enabled={} right={} left={} dual={} rmod={} lmod={} dmod={} mco={} noStaminaPA={} to '{}'",
+            pluginEnabled, keyCode, leftKeyCode, dualKeyCode, rightMod, leftMod, dualMod, mcoMode, noStaminaPA, savePath);
         return true;
     }
     const char* GetMacroKeyName(uint32_t code, bool isModifier)
@@ -673,7 +611,6 @@ namespace {
         case CaptureTarget::kRightKey: return { &g_pendingAltPowerAttackKey, &g_altPowerAttackKey, &g_hasUnsavedKeyChange, false };
         case CaptureTarget::kLeftKey:  return { &g_pendingAltLeftPowerAttackKey, &g_altLeftPowerAttackKey, &g_hasUnsavedLeftKeyChange, false };
         case CaptureTarget::kDualKey:  return { &g_pendingAltDualPowerAttackKey, &g_altDualPowerAttackKey, &g_hasUnsavedDualKeyChange, false };
-        case CaptureTarget::kBlockKey: return { &g_pendingAltBlockKey, &g_altBlockKey, &g_hasUnsavedBlockKeyChange, false };
         case CaptureTarget::kRightMod: return { &g_pendingRightModifier, &g_rightModifier, &g_hasUnsavedRightMod, true };
         case CaptureTarget::kLeftMod:  return { &g_pendingLeftModifier, &g_leftModifier, &g_hasUnsavedLeftMod, true };
         case CaptureTarget::kDualMod:  return { &g_pendingDualModifier, &g_dualModifier, &g_hasUnsavedDualMod, true };
@@ -778,10 +715,6 @@ namespace {
         DrawBindRow("Modifier", "dual_mod", CaptureTarget::kDualMod);
         ImGuiMCP::Separator();
 
-        ImGuiMCP::Text("Block");
-        DrawBindRow("Key / Button", "block_key", CaptureTarget::kBlockKey);
-        ImGuiMCP::Separator();
-
         bool chosenMco = g_pendingMcoMode;
         if (ImGuiMCP::Checkbox("MCO Compatibility", &chosenMco)) {
             g_pendingMcoMode = chosenMco;
@@ -801,7 +734,7 @@ namespace {
         }
 
         const bool hasUnsaved = g_hasUnsavedKeyChange || g_hasUnsavedLeftKeyChange ||
-            g_hasUnsavedBlockKeyChange || g_hasUnsavedDualKeyChange ||
+            g_hasUnsavedDualKeyChange ||
             g_hasUnsavedRightMod || g_hasUnsavedLeftMod || g_hasUnsavedDualMod ||
             g_hasUnsavedMcoChange || g_hasUnsavedNoStaminaChange || g_hasUnsavedEnabledChange;
 
@@ -814,7 +747,6 @@ namespace {
         if (ImGuiMCP::Button("Save to INI")) {
             const uint32_t saveCode = SanitizeKeyCode(g_pendingAltPowerAttackKey);
             const uint32_t saveLeftCode = SanitizeKeyCode(g_pendingAltLeftPowerAttackKey);
-            const uint32_t saveBlockCode = SanitizeKeyCode(g_pendingAltBlockKey);
             const uint32_t saveDualCode = SanitizeKeyCode(g_pendingAltDualPowerAttackKey);
             const uint32_t saveRMod = SanitizeUnifiedModifier(g_pendingRightModifier);
             const uint32_t saveLMod = SanitizeUnifiedModifier(g_pendingLeftModifier);
@@ -822,16 +754,13 @@ namespace {
             const bool saveMco = g_pendingMcoMode;
             const bool saveNoStamina = g_pendingNoStaminaPowerAttack;
             const bool saveEnabled = g_pendingPluginEnabled;
-            if (SaveConfig(saveCode, saveLeftCode, saveBlockCode, saveDualCode, saveRMod, saveLMod, saveDMod, saveMco, saveNoStamina, saveEnabled)) {
+            if (SaveConfig(saveCode, saveLeftCode, saveDualCode, saveRMod, saveLMod, saveDMod, saveMco, saveNoStamina, saveEnabled)) {
                 g_altPowerAttackKey = saveCode;
                 g_pendingAltPowerAttackKey = saveCode;
                 g_hasUnsavedKeyChange = false;
                 g_altLeftPowerAttackKey = saveLeftCode;
                 g_pendingAltLeftPowerAttackKey = saveLeftCode;
                 g_hasUnsavedLeftKeyChange = false;
-                g_altBlockKey = saveBlockCode;
-                g_pendingAltBlockKey = saveBlockCode;
-                g_hasUnsavedBlockKeyChange = false;
                 g_altDualPowerAttackKey = saveDualCode;
                 g_pendingAltDualPowerAttackKey = saveDualCode;
                 g_hasUnsavedDualKeyChange = false;
@@ -864,8 +793,6 @@ namespace {
             g_hasUnsavedKeyChange = false;
             g_pendingAltLeftPowerAttackKey = g_altLeftPowerAttackKey.load();
             g_hasUnsavedLeftKeyChange = false;
-            g_pendingAltBlockKey = g_altBlockKey.load();
-            g_hasUnsavedBlockKeyChange = false;
             g_pendingAltDualPowerAttackKey = g_altDualPowerAttackKey.load();
             g_hasUnsavedDualKeyChange = false;
             g_pendingRightModifier = g_rightModifier.load();
@@ -903,9 +830,6 @@ namespace {
             g_altLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
             g_pendingAltLeftPowerAttackKey = kDefaultAltLeftPowerAttackKey;
             g_hasUnsavedLeftKeyChange = false;
-            g_altBlockKey = kKeyDisabled;
-            g_pendingAltBlockKey = kKeyDisabled;
-            g_hasUnsavedBlockKeyChange = false;
             g_altDualPowerAttackKey = kKeyDisabled;
             g_pendingAltDualPowerAttackKey = kKeyDisabled;
             g_hasUnsavedDualKeyChange = false;
@@ -943,13 +867,6 @@ namespace {
         g_altLeftPowerAttackKey = parsedLeftKey;
         g_pendingAltLeftPowerAttackKey = parsedLeftKey;
         g_hasUnsavedLeftKeyChange = false;
-
-        const long rawBlockValue = g_ini.GetLongValue("General", "iBlockKeycode", static_cast<long>(kKeyDisabled));
-        uint32_t parsedBlockKey = SanitizeKeyCode(static_cast<uint32_t>(rawBlockValue < 0 ? 0 : rawBlockValue));
-
-        g_altBlockKey = parsedBlockKey;
-        g_pendingAltBlockKey = parsedBlockKey;
-        g_hasUnsavedBlockKeyChange = false;
 
         const long rawDualValue = g_ini.GetLongValue("General", "iDualKeycode", static_cast<long>(kKeyDisabled));
         uint32_t parsedDualKey = SanitizeKeyCode(static_cast<uint32_t>(rawDualValue < 0 ? 0 : rawDualValue));
@@ -998,8 +915,8 @@ namespace {
         g_hasUnsavedEnabledChange = false;
 
         g_ini.Reset();
-        SKSE::log::info("Loaded config enabled={} right={} left={} block={} dual={} rmod={} lmod={} dmod={} mco={} noStaminaPA={} from '{}'",
-            parsedEnabled, parsedKey, parsedLeftKey, parsedBlockKey, parsedDualKey, parsedRMod, parsedLMod, parsedDMod, parsedMco, parsedNoStamina, path);
+        SKSE::log::info("Loaded config enabled={} right={} left={} dual={} rmod={} lmod={} dmod={} mco={} noStaminaPA={} from '{}'",
+            parsedEnabled, parsedKey, parsedLeftKey, parsedDualKey, parsedRMod, parsedLMod, parsedDMod, parsedMco, parsedNoStamina, path);
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
@@ -1022,10 +939,6 @@ namespace {
             if (g_hasUnsavedLeftKeyChange) {
                 g_pendingAltLeftPowerAttackKey = g_altLeftPowerAttackKey.load();
                 g_hasUnsavedLeftKeyChange = false;
-            }
-            if (g_hasUnsavedBlockKeyChange) {
-                g_pendingAltBlockKey = g_altBlockKey.load();
-                g_hasUnsavedBlockKeyChange = false;
             }
             if (g_hasUnsavedDualKeyChange) {
                 g_pendingAltDualPowerAttackKey = g_altDualPowerAttackKey.load();
@@ -1150,7 +1063,7 @@ SKSEPluginLoad(const LoadInterface* skse)
         }
 
 
-        SKSE::log::info("Initialized — right keycode={}, left keycode={}, dual keycode={}, block keycode={}", g_altPowerAttackKey.load(), g_altLeftPowerAttackKey.load(), g_altDualPowerAttackKey.load(), g_altBlockKey.load());
+        SKSE::log::info("Initialized — right keycode={}, left keycode={}, dual keycode={}", g_altPowerAttackKey.load(), g_altLeftPowerAttackKey.load(), g_altDualPowerAttackKey.load());
     });
     return true;
 }

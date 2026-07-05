@@ -1,8 +1,8 @@
 #include <winresrc.h>
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION @PROJECT_VERSION_MAJOR@, @PROJECT_VERSION_MINOR@, @PROJECT_VERSION_PATCH@, 0
-PRODUCTVERSION @PROJECT_VERSION_MAJOR@, @PROJECT_VERSION_MINOR@, @PROJECT_VERSION_PATCH@, 0
+FILEVERSION @PLUGIN_VERSION_MAJOR@, @PLUGIN_VERSION_MINOR@, @PLUGIN_VERSION_PATCH@, 0
+PRODUCTVERSION @PLUGIN_VERSION_MAJOR@, @PLUGIN_VERSION_MINOR@, @PLUGIN_VERSION_PATCH@, 0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -13,13 +13,13 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "FileDescription", "@PROJECT_DESCRIPTION@"
-            VALUE "FileVersion", "@PROJECT_VERSION@.0"
-            VALUE "InternalName", "@PROJECT_NAME@"
+            VALUE "FileDescription", "@PLUGIN_DESCRIPTION@"
+            VALUE "FileVersion", "@PLUGIN_VERSION@.0"
+            VALUE "InternalName", "@PLUGIN_NAME@"
             VALUE "LegalCopyright", ""
-            VALUE "OriginalFilename", "@PROJECT_NAME@.dll"
-            VALUE "ProductName", "@PROJECT_NAME@"
-            VALUE "ProductVersion", "@PROJECT_VERSION@.0"
+            VALUE "OriginalFilename", "@PLUGIN_NAME@.dll"
+            VALUE "ProductName", "@PLUGIN_NAME@"
+            VALUE "ProductVersion", "@PLUGIN_VERSION@.0"
         END
     END
     BLOCK "VarFileInfo"

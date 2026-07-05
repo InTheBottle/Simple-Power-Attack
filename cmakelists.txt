@@ -15,18 +15,25 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
 include(GNUInstallDirs)
 
-configure_file(
-        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.rc.in
-        ${CMAKE_CURRENT_BINARY_DIR}/version.rc
-        @ONLY)
+# Generates a per-plugin version.rc so each DLL carries its own file metadata.
+function(configure_plugin_version_rc PLUGIN_NAME PLUGIN_DESCRIPTION OUT_RC)
+    set(PLUGIN_VERSION ${PROJECT_VERSION})
+    set(PLUGIN_VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
+    set(PLUGIN_VERSION_MINOR ${PROJECT_VERSION_MINOR})
+    set(PLUGIN_VERSION_PATCH ${PROJECT_VERSION_PATCH})
+    configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.rc.in
+            ${CMAKE_CURRENT_BINARY_DIR}/${PLUGIN_NAME}.version.rc
+            @ONLY)
+    set(${OUT_RC} ${CMAKE_CURRENT_BINARY_DIR}/${PLUGIN_NAME}.version.rc PARENT_SCOPE)
+endfunction()
 
-set(headers)
+configure_plugin_version_rc(SimplePowerAttack "${PROJECT_DESCRIPTION}" SIMPLE_POWER_ATTACK_RC)
+configure_plugin_version_rc(SimpleBlock "A SKSE plugin that binds block to a simple configurable alternate key." SIMPLE_BLOCK_RC)
 
 set(sources
-        src/Main.cpp
-        ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
-
-set(tests)
+        src/main.cpp
+        src/block/main.cpp)
 
 source_group(
         TREE ${CMAKE_CURRENT_SOURCE_DIR}
@@ -52,67 +59,55 @@ add_subdirectory("${CommonLibSSE_SOURCE_DIR}" CommonLibSSE-NG EXCLUDE_FROM_ALL)
 include("${CommonLibSSE_SOURCE_DIR}/cmake/CommonLibSSE.cmake")
 
 ########################################################################################################################
-## Configure target DLL
+## Configure target DLLs
 ########################################################################################################################
 find_path(SIMPLEINI_INCLUDE_DIRS "SimpleIni.h")
 
-add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources})
-add_library("${PROJECT_NAME}::${PROJECT_NAME}" ALIAS "${PROJECT_NAME}")
+add_commonlibsse_plugin(SimplePowerAttack SOURCES src/main.cpp ${SIMPLE_POWER_ATTACK_RC})
+add_library("SimplePowerAttack::SimplePowerAttack" ALIAS "SimplePowerAttack")
 
-target_include_directories(${PROJECT_NAME}
-        PRIVATE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/src>
-        $<INSTALL_INTERFACE:src>
-        ${SIMPLEINI_INCLUDE_DIRS})
+add_commonlibsse_plugin(SimpleBlock SOURCES src/block/main.cpp ${SIMPLE_BLOCK_RC})
+add_library("SimpleBlock::SimpleBlock" ALIAS "SimpleBlock")
 
-target_include_directories(${PROJECT_NAME}
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+foreach(PLUGIN_TARGET SimplePowerAttack SimpleBlock)
+    target_include_directories(${PLUGIN_TARGET}
+            PRIVATE
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/src>
+            $<INSTALL_INTERFACE:src>
+            ${SIMPLEINI_INCLUDE_DIRS})
 
-target_link_libraries(${PROJECT_NAME}
-        PRIVATE
-        CommonLibSSE::CommonLibSSE)
+    target_include_directories(${PLUGIN_TARGET}
+            PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
-target_precompile_headers(${PROJECT_NAME}
-        PRIVATE
-        src/PCH.h)
+    target_link_libraries(${PLUGIN_TARGET}
+            PRIVATE
+            CommonLibSSE::CommonLibSSE)
 
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:/Zi>")
-    target_link_options(${PROJECT_NAME} PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
-endif()
+    target_precompile_headers(${PLUGIN_TARGET}
+            PRIVATE
+            src/PCH.h)
+
+    if(MSVC)
+        target_compile_options(${PLUGIN_TARGET} PRIVATE "$<$<CONFIG:Release>:/Zi>")
+        target_link_options(${PLUGIN_TARGET} PRIVATE "$<$<CONFIG:Release>:/DEBUG>" "$<$<CONFIG:Release>:/OPT:REF>" "$<$<CONFIG:Release>:/OPT:ICF>")
+    endif()
+
+    # Automatic deployment to Mod Organizer 2 mod directory.
+    foreach(DEPLOY_TARGET $ENV{CommonLibSSESamplePluginTargets})
+        message("Adding deployment target ${DEPLOY_TARGET} for ${PLUGIN_TARGET}.")
+        add_custom_command(TARGET ${PLUGIN_TARGET} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PLUGIN_TARGET}> "${DEPLOY_TARGET}/SKSE/Plugins/")
+        if(${CMAKE_BUILD_TYPE} STREQUAL Debug OR ${CMAKE_BUILD_TYPE} STREQUAL RelWithDebInfo)
+            add_custom_command(TARGET ${PLUGIN_TARGET} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_PDB_FILE:${PLUGIN_TARGET}> "${DEPLOY_TARGET}/SKSE/Plugins/")
+        endif()
+    endforeach()
+endforeach()
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
-install(TARGETS ${PROJECT_NAME}
+install(TARGETS SimplePowerAttack SimpleBlock
         DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-
-
-########################################################################################################################
-## Automatic plugin deployment
-########################################################################################################################
-# Automatic deployment to FOMOD directory.
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(BUILD_NAME "Debug")
-else()
-    set(BUILD_NAME "Release")
-endif()
-set_property(TARGET ${PROJECT_NAME}
-        APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${OUTPUT_DLLS}")
-set_property(TARGET ${PROJECT_NAME}
-        APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${OUTPUT_PDBS}")
-set_property(TARGET ${PROJECT_NAME}
-        APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${OUTPUT_SCRIPTS}")
-
-# Automatic deployment to Mod Organizer 2 mod directory.
-foreach(DEPLOY_TARGET $ENV{CommonLibSSESamplePluginTargets})
-    message("Adding deployment target ${DEPLOY_TARGET}.")
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${PROJECT_NAME}> "${DEPLOY_TARGET}/SKSE/Plugins/")
-    if(${CMAKE_BUILD_TYPE} STREQUAL Debug OR ${CMAKE_BUILD_TYPE} STREQUAL RelWithDebInfo)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_PDB_FILE:${PROJECT_NAME}> "${DEPLOY_TARGET}/SKSE/Plugins/")
-    endif()
-endforeach()
