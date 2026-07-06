@@ -10,6 +10,7 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
     constexpr uint32_t kKeyDisabled = 0;  // 0 = key disabled
+    constexpr uint32_t kModifierNone = 0;
 
     constexpr uint32_t kMacroNumKeyboardKeys = 256;
     constexpr uint32_t kMacroNumMouseButtons = 8;
@@ -20,6 +21,12 @@ namespace {
     constexpr uint32_t kMouseLeftMacro = kMacroNumKeyboardKeys;  // 256 == Mouse Left (used to interact with the menu)
     constexpr uint32_t kEscapeScancode = 0x01;                   // DirectInput scancode for Escape (cancels capture)
     constexpr uint32_t kCaptureCancelled = 0xFFFFFFFFu;          // sentinel: capture ended without a new binding
+
+    enum class CaptureTarget : uint32_t {
+        kNone = 0,
+        kBlockKey,
+        kBlockMod,
+    };
 
     // Skyrim gamepad button IDs (from ButtonEvent::GetIDCode for kGamepad device), controller-agnostic.
     constexpr uint32_t kGamepadDpadUp        = 0x0001;
@@ -45,15 +52,20 @@ namespace {
     std::atomic<uint32_t> g_altBlockKey = kKeyDisabled;
     uint32_t g_pendingAltBlockKey = kKeyDisabled;
     bool g_hasUnsavedBlockKeyChange = false;
+    std::atomic<uint32_t> g_blockModifier = kModifierNone;
+    uint32_t g_pendingBlockModifier = kModifierNone;
+    bool g_hasUnsavedBlockModChange = false;
     std::atomic<bool> g_pluginEnabled = true;
     bool g_pendingPluginEnabled = true;
     bool g_hasUnsavedEnabledChange = false;
     SKSEMenuFramework::Model::InputEvent* g_menuFrameworkInputHook = nullptr;
     SKSEMenuFramework::Model::Event* g_menuFrameworkEventHook = nullptr;
 
-    std::atomic<bool> g_captureActive = false;
+    std::atomic<CaptureTarget> g_captureTarget = CaptureTarget::kNone;
     std::atomic<uint32_t> g_capturedCode = kCaptureCancelled;
-    bool g_renderCaptureActive = false;
+    CaptureTarget g_renderActiveCapture = CaptureTarget::kNone;
+    std::array<std::atomic<bool>, kMaxMacros> g_keyStates{};
+    bool g_blockComboActive = false;
 
     CSimpleIniA g_ini(true, false, false);
 
@@ -167,10 +179,27 @@ namespace {
         return true;
     }
 
+    bool IsModifierHeld(uint32_t modifierKey)
+    {
+        if (modifierKey == kModifierNone) return true;
+        if (modifierKey >= kMaxMacros) return false;
+        return g_keyStates[modifierKey].load(std::memory_order_relaxed);
+    }
+
     bool HandleBlockEvent(ButtonEvent* button, uint32_t keyCode)
     {
         const uint32_t blockKey = g_altBlockKey.load();
         if (blockKey == kKeyDisabled || keyCode != blockKey) return false;
+        const uint32_t modifier = g_blockModifier.load();
+        if (modifier != kModifierNone) {
+            if (button->IsDown()) {
+                g_blockComboActive = IsModifierHeld(modifier);
+            }
+            if (!g_blockComboActive) return false;
+            if (button->IsUp()) {
+                g_blockComboActive = false;
+            }
+        }
 
         auto* player = PlayerCharacter::GetSingleton();
         if (!player) return false;
@@ -204,7 +233,7 @@ namespace {
         } else {
             g_capturedCode.store(macroKey, std::memory_order_relaxed);
         }
-        g_captureActive.store(false, std::memory_order_release);
+        g_captureTarget.store(CaptureTarget::kNone, std::memory_order_release);
     }
 
     void ProcessInputChain(RE::InputEvent* events)
@@ -218,10 +247,13 @@ namespace {
             if (!button) continue;
 
             const uint32_t macroKey = ToMacroKeyCode(button);
+            if (macroKey < kMaxMacros) {
+                g_keyStates[macroKey].store(button->Value() != 0.0f, std::memory_order_relaxed);
+            }
 
             // Press-to-bind: while listening, the next fresh button-down becomes the new binding.
             // Mouse Left is skipped so the user can still click menu buttons to cancel/switch.
-            if (g_captureActive.load(std::memory_order_acquire)) {
+            if (g_captureTarget.load(std::memory_order_acquire) != CaptureTarget::kNone) {
                 const bool isDown = button->Value() != 0.0f && button->HeldDuration() == 0.0f;
                 if (isDown && macroKey < kMaxMacros && macroKey != kMouseLeftMacro) {
                     HandleCaptureInput(macroKey);
@@ -243,15 +275,24 @@ namespace {
         }
         return keyCode;
     }
+    uint32_t SanitizeUnifiedModifier(uint32_t keyCode)
+    {
+        if (keyCode == kModifierNone) return kModifierNone;
+        if (keyCode >= 1 && keyCode < kMacroNumKeyboardKeys) return keyCode;
+        if (keyCode >= kMacroGamepadOffset && keyCode < kMaxMacros) return keyCode;
+        return kModifierNone;
+    }
 
-    bool SaveConfig(uint32_t blockKeyCode, bool pluginEnabled)
+    bool SaveConfig(uint32_t blockKeyCode, uint32_t blockMod, bool pluginEnabled)
     {
         blockKeyCode = SanitizeKeyCode(blockKeyCode);
+        blockMod = SanitizeUnifiedModifier(blockMod);
         const std::string savePath = GetConfigPath(kPrimaryConfigFileName);
 
         g_ini.Reset();
         g_ini.SetBoolValue("General", "bEnabled", pluginEnabled);
         g_ini.SetLongValue("General", "iBlockKeycode", static_cast<long>(blockKeyCode));
+        g_ini.SetLongValue("General", "iBlockMod", static_cast<long>(blockMod));
 
         try {
             std::filesystem::path savePathFs(savePath);
@@ -270,14 +311,14 @@ namespace {
             return false;
         }
 
-        SKSE::log::info("Saved config enabled={} block={} to '{}'", pluginEnabled, blockKeyCode, savePath);
+        SKSE::log::info("Saved config enabled={} block={} mod={} to '{}'", pluginEnabled, blockKeyCode, blockMod, savePath);
         return true;
     }
 
-    const char* GetMacroKeyName(uint32_t code)
+    const char* GetMacroKeyName(uint32_t code, bool isModifier)
     {
         if (code == kKeyDisabled) {
-            return "Not Set";
+            return isModifier ? "None" : "Not Set";
         }
 
         if (code >= kMacroNumKeyboardKeys && code < kMacroGamepadOffset) {
@@ -347,43 +388,66 @@ namespace {
         return "Unknown";
     }
 
-    void StartCapture()
+    struct PendingBinding {
+        uint32_t* pending;
+        std::atomic<uint32_t>* committed;
+        bool* unsaved;
+        bool isModifier;
+    };
+
+    PendingBinding GetBinding(CaptureTarget target)
     {
-        g_renderCaptureActive = true;
+        switch (target) {
+        case CaptureTarget::kBlockKey: return { &g_pendingAltBlockKey, &g_altBlockKey, &g_hasUnsavedBlockKeyChange, false };
+        case CaptureTarget::kBlockMod: return { &g_pendingBlockModifier, &g_blockModifier, &g_hasUnsavedBlockModChange, true };
+        default:                       return { nullptr, nullptr, nullptr, false };
+        }
+    }
+
+    void StartCapture(CaptureTarget target)
+    {
+        g_renderActiveCapture = target;
         g_capturedCode.store(kCaptureCancelled, std::memory_order_relaxed);
-        g_captureActive.store(true, std::memory_order_release);
+        g_captureTarget.store(target, std::memory_order_release);
     }
 
     void CancelCapture()
     {
-        g_renderCaptureActive = false;
-        g_captureActive.store(false, std::memory_order_release);
+        g_renderActiveCapture = CaptureTarget::kNone;
+        g_captureTarget.store(CaptureTarget::kNone, std::memory_order_release);
     }
 
     // Render thread: if the input thread finished a capture, apply the result to the pending value.
     void PollCaptureResult()
     {
-        if (!g_renderCaptureActive) return;
-        if (g_captureActive.load(std::memory_order_acquire)) return;  // still listening
+        if (g_renderActiveCapture == CaptureTarget::kNone) return;
+        if (g_captureTarget.load(std::memory_order_acquire) != CaptureTarget::kNone) return;  // still listening
 
         const uint32_t raw = g_capturedCode.load(std::memory_order_relaxed);
-        g_renderCaptureActive = false;
+        const CaptureTarget target = g_renderActiveCapture;
+        g_renderActiveCapture = CaptureTarget::kNone;
 
         if (raw == kCaptureCancelled) return;
 
-        const uint32_t sanitized = SanitizeKeyCode(raw);
-        g_pendingAltBlockKey = sanitized;
-        g_hasUnsavedBlockKeyChange = (sanitized != g_altBlockKey.load());
+        const PendingBinding b = GetBinding(target);
+        if (!b.pending) return;
+
+        const uint32_t sanitized = b.isModifier ? SanitizeUnifiedModifier(raw) : SanitizeKeyCode(raw);
+        *b.pending = sanitized;
+        *b.unsaved = (sanitized != b.committed->load());
     }
 
-    // Draws a "press to bind" button plus a Clear button for the block binding.
-    void DrawBindButton(const char* idSuffix)
+    // Draws a "press to bind" button plus a Clear button for one binding.
+    void DrawBindButton(const char* idSuffix, CaptureTarget target)
     {
-        const bool listening = g_renderCaptureActive;
+        const PendingBinding b = GetBinding(target);
+        if (!b.pending) return;
+
+        const bool listening = (g_renderActiveCapture == target);
 
         std::string label = listening
             ? std::string(">> Press any key / button...  (Esc to cancel) <<")
-            : std::string(GetMacroKeyName(g_pendingAltBlockKey));
+            : std::string(GetMacroKeyName(*b.pending, b.isModifier));
         label += "##";
         label += idSuffix;
 
@@ -391,15 +455,15 @@ namespace {
             if (listening) {
                 CancelCapture();
             } else {
-                StartCapture();
+                StartCapture(target);
             }
         }
 
         ImGuiMCP::SameLine();
         std::string clearLabel = std::string("Clear##clr_") + idSuffix;
         if (ImGuiMCP::Button(clearLabel.c_str())) {
-            g_pendingAltBlockKey = kKeyDisabled;
-            g_hasUnsavedBlockKeyChange = (kKeyDisabled != g_altBlockKey.load());
+            *b.pending = kKeyDisabled;
+            *b.unsaved = (kKeyDisabled != b.committed->load());
             if (listening) CancelCapture();
         }
     }
@@ -418,7 +482,10 @@ namespace {
         ImGuiMCP::Text("Block");
         ImGuiMCP::Text("Key / Button");
         ImGuiMCP::SameLine(170.0f);
-        DrawBindButton("block_key");
+        DrawBindButton("block_key", CaptureTarget::kBlockKey);
+        ImGuiMCP::Text("Modifier");
+        ImGuiMCP::SameLine(170.0f);
+        DrawBindButton("block_mod", CaptureTarget::kBlockMod);
         ImGuiMCP::Separator();
 
         bool disableChecked = !g_pendingPluginEnabled;
@@ -427,7 +494,7 @@ namespace {
             g_hasUnsavedEnabledChange = (g_pendingPluginEnabled != g_pluginEnabled.load());
         }
 
-        const bool hasUnsaved = g_hasUnsavedBlockKeyChange || g_hasUnsavedEnabledChange;
+        const bool hasUnsaved = g_hasUnsavedBlockKeyChange || g_hasUnsavedBlockModChange || g_hasUnsavedEnabledChange;
 
         ImGuiMCP::Separator();
 
@@ -437,11 +504,15 @@ namespace {
 
         if (ImGuiMCP::Button("Save to INI")) {
             const uint32_t saveBlockCode = SanitizeKeyCode(g_pendingAltBlockKey);
+            const uint32_t saveBlockMod = SanitizeUnifiedModifier(g_pendingBlockModifier);
             const bool saveEnabled = g_pendingPluginEnabled;
-            if (SaveConfig(saveBlockCode, saveEnabled)) {
+            if (SaveConfig(saveBlockCode, saveBlockMod, saveEnabled)) {
                 g_altBlockKey = saveBlockCode;
                 g_pendingAltBlockKey = saveBlockCode;
                 g_hasUnsavedBlockKeyChange = false;
+                g_blockModifier = saveBlockMod;
+                g_pendingBlockModifier = saveBlockMod;
+                g_hasUnsavedBlockModChange = false;
                 g_pluginEnabled = saveEnabled;
                 g_pendingPluginEnabled = saveEnabled;
                 g_hasUnsavedEnabledChange = false;
@@ -454,6 +525,8 @@ namespace {
             CancelCapture();
             g_pendingAltBlockKey = g_altBlockKey.load();
             g_hasUnsavedBlockKeyChange = false;
+            g_pendingBlockModifier = g_blockModifier.load();
+            g_hasUnsavedBlockModChange = false;
             g_pendingPluginEnabled = g_pluginEnabled.load();
             g_hasUnsavedEnabledChange = false;
         }
@@ -483,6 +556,9 @@ namespace {
             g_altBlockKey = migratedKey;
             g_pendingAltBlockKey = migratedKey;
             g_hasUnsavedBlockKeyChange = false;
+            g_blockModifier = kModifierNone;
+            g_pendingBlockModifier = kModifierNone;
+            g_hasUnsavedBlockModChange = false;
             g_pluginEnabled = true;
             g_pendingPluginEnabled = true;
             g_hasUnsavedEnabledChange = false;
@@ -497,13 +573,20 @@ namespace {
         g_pendingAltBlockKey = parsedBlockKey;
         g_hasUnsavedBlockKeyChange = false;
 
+        const long rawModValue = g_ini.GetLongValue("General", "iBlockMod", static_cast<long>(kModifierNone));
+        const uint32_t parsedBlockMod = SanitizeUnifiedModifier(static_cast<uint32_t>(rawModValue < 0 ? 0 : rawModValue));
+
+        g_blockModifier = parsedBlockMod;
+        g_pendingBlockModifier = parsedBlockMod;
+        g_hasUnsavedBlockModChange = false;
+
         const bool parsedEnabled = g_ini.GetBoolValue("General", "bEnabled", true);
         g_pluginEnabled = parsedEnabled;
         g_pendingPluginEnabled = parsedEnabled;
         g_hasUnsavedEnabledChange = false;
 
         g_ini.Reset();
-        SKSE::log::info("Loaded config enabled={} block={} from '{}'", parsedEnabled, parsedBlockKey, path);
+        SKSE::log::info("Loaded config enabled={} block={} mod={} from '{}'", parsedEnabled, parsedBlockKey, parsedBlockMod, path);
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
@@ -520,6 +603,10 @@ namespace {
             if (g_hasUnsavedBlockKeyChange) {
                 g_pendingAltBlockKey = g_altBlockKey.load();
                 g_hasUnsavedBlockKeyChange = false;
+            }
+            if (g_hasUnsavedBlockModChange) {
+                g_pendingBlockModifier = g_blockModifier.load();
+                g_hasUnsavedBlockModChange = false;
             }
             if (g_hasUnsavedEnabledChange) {
                 g_pendingPluginEnabled = g_pluginEnabled.load();
@@ -599,7 +686,7 @@ SKSEPluginLoad(const LoadInterface* skse)
             g_menuFrameworkEventHook = SKSEMenuFramework::AddEvent(OnMenuFrameworkEvent, 0.0f);
         }
 
-        SKSE::log::info("Initialized — block keycode={}", g_altBlockKey.load());
+        SKSE::log::info("Initialized — block keycode={}, modifier={}", g_altBlockKey.load(), g_blockModifier.load());
     });
     return true;
 }
