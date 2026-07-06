@@ -352,6 +352,16 @@ namespace {
             }
         }
     }
+    void ClearBlockingState(PlayerCharacter* player)
+    {
+        if (auto* actorState = player->AsActorState()) {
+            actorState->actorState2.wantBlocking = 0;
+        }
+        bool isBlocking = false;
+        if (player->GetGraphVariableBool("IsBlocking", isBlocking) && isBlocking) {
+            player->NotifyAnimationGraph("blockStop");
+        }
+    }
 
     void TriggerPowerAttack(PlayerCharacter* player)
     {
@@ -359,6 +369,8 @@ namespace {
 
         const bool mcoMode = g_mcoMode.load();
         g_task->AddTask([player, action = g_rightPowerAttackAction, mcoMode]() {
+            ClearBlockingState(player);
+
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
@@ -379,6 +391,8 @@ namespace {
 
         const bool mcoMode = g_mcoMode.load();
         g_task->AddTask([player, action = g_leftPowerAttackAction, mcoMode]() {
+            ClearBlockingState(player);
+
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
@@ -399,6 +413,8 @@ namespace {
 
         const bool mcoMode = g_mcoMode.load();
         g_task->AddTask([player, action = g_dualPowerAttackAction, mcoMode]() {
+            ClearBlockingState(player);
+
             std::unique_ptr<TESActionData> data(TESActionData::Create());
             data->source = NiPointer<TESObjectREFR>(player);
             data->action = action;
