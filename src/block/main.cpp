@@ -143,7 +143,7 @@ namespace {
         if (equippedObj) {
             auto* weap = skyrim_cast<TESObjectWEAP*>(equippedObj);
             if (!weap) return false;  // spell or non-weapon in right hand
-            if (weap->IsBow() || weap->IsStaff() || weap->IsCrossbow()) return false;
+            if (weap->IsBow() || weap->IsCrossbow()) return false;
         }
 
         return true;
