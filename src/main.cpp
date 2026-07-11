@@ -256,47 +256,65 @@ namespace {
         return g_keyStates[modifierKey].load(std::memory_order_relaxed);
     }
 
-    bool TryPowerAttack(uint32_t keyCode)
+    enum class PowerAttackKind : uint32_t {
+        kNone = 0,
+        kRight,
+        kLeft,
+        kDual,
+    };
+
+    PowerAttackKind ClassifyPowerAttack(uint32_t keyCode)
     {
+        if (!g_pluginEnabled.load()) return PowerAttackKind::kNone;
+
         const uint32_t rightKey = g_altPowerAttackKey.load();
         const uint32_t leftKey = g_altLeftPowerAttackKey.load();
         const uint32_t dualKey = g_altDualPowerAttackKey.load();
         const bool isRightKey = (rightKey != kKeyDisabled) && (keyCode == rightKey);
         const bool isLeftKey = (leftKey != kKeyDisabled) && (keyCode == leftKey);
         const bool isDualKey = (dualKey != kKeyDisabled) && (keyCode == dualKey);
-        if (!isRightKey && !isLeftKey && !isDualKey) return false;
+        if (!isRightKey && !isLeftKey && !isDualKey) return PowerAttackKind::kNone;
 
         auto* player = PlayerCharacter::GetSingleton();
-        if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
+        if (!player || !IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return PowerAttackKind::kNone;
 
         if (g_noStaminaPowerAttack.load() && player->AsActorValueOwner()->GetActorValue(ActorValue::kStamina) <= 0.0f) {
+            return PowerAttackKind::kNone;
+        }
+
+        if (isDualKey && g_dualPowerAttackAction && IsModifierHeld(g_dualModifier.load()) && IsDualWielding(player)) {
+            return PowerAttackKind::kDual;
+        }
+
+        if (isRightKey && g_rightPowerAttackAction && IsModifierHeld(g_rightModifier.load())) {
+            return PowerAttackKind::kRight;
+        }
+
+        if (isLeftKey && g_leftPowerAttackAction && IsLeftHandValidForPowerAttack(player) && IsModifierHeld(g_leftModifier.load())) {
+            return PowerAttackKind::kLeft;
+        }
+
+        return PowerAttackKind::kNone;
+    }
+
+    bool TryPowerAttack(uint32_t keyCode)
+    {
+        auto* player = PlayerCharacter::GetSingleton();
+        if (!player) return false;
+
+        switch (ClassifyPowerAttack(keyCode)) {
+        case PowerAttackKind::kDual:
+            TriggerDualPowerAttack(player);
+            return true;
+        case PowerAttackKind::kRight:
+            TriggerPowerAttack(player);
+            return true;
+        case PowerAttackKind::kLeft:
+            TriggerLeftPowerAttack(player);
+            return true;
+        default:
             return false;
         }
-
-        bool consumed = false;
-
-        if (isDualKey) {
-            if (g_dualPowerAttackAction && IsModifierHeld(g_dualModifier.load()) && IsDualWielding(player)) {
-                TriggerDualPowerAttack(player);
-                consumed = true;
-            }
-        }
-
-        if (isRightKey && !consumed) {
-            if (IsModifierHeld(g_rightModifier.load())) {
-                TriggerPowerAttack(player);
-                consumed = true;
-            }
-        }
-
-        if (isLeftKey && !consumed) {
-            if (IsLeftHandValidForPowerAttack(player) && IsModifierHeld(g_leftModifier.load())) {
-                TriggerLeftPowerAttack(player);
-                consumed = true;
-            }
-        }
-
-        return consumed;
     }
 
     void HandleCaptureInput(uint32_t macroKey)
@@ -1028,6 +1046,11 @@ namespace {
         spdlog::set_default_logger(std::move(log));
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
     }
+}
+
+extern "C" __declspec(dllexport) bool SimplePowerAttack_IsChordActive(uint32_t a_macroKey)
+{
+    return ClassifyPowerAttack(a_macroKey) != PowerAttackKind::kNone;
 }
 
 SKSEPluginLoad(const LoadInterface* skse)

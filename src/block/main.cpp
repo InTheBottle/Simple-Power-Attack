@@ -67,6 +67,9 @@ namespace {
     std::array<std::atomic<bool>, kMaxMacros> g_keyStates{};
     bool g_blockComboActive = false;
 
+    using PowerAttackChordCheck_t = bool (*)(uint32_t);
+    PowerAttackChordCheck_t g_powerAttackChordCheck = nullptr;
+
     CSimpleIniA g_ini(true, false, false);
 
     void LoadConfig();
@@ -153,9 +156,20 @@ namespace {
 
         TESForm* equippedObj = player->GetEquippedObject(false);
         if (equippedObj) {
-            auto* weap = skyrim_cast<TESObjectWEAP*>(equippedObj);
-            if (!weap) return false;  // spell or non-weapon in right hand
-            if (weap->IsBow() || weap->IsCrossbow()) return false;
+            if (auto* weap = skyrim_cast<TESObjectWEAP*>(equippedObj)) {
+                if (weap->IsBow() || weap->IsCrossbow()) return false;
+            } else {
+                TESForm* leftObj = player->GetEquippedObject(true);
+                bool leftCanBlock = false;
+                if (leftObj) {
+                    if (auto* leftWeap = skyrim_cast<TESObjectWEAP*>(leftObj)) {
+                        leftCanBlock = !leftWeap->IsBow() && !leftWeap->IsCrossbow();
+                    } else if (auto* leftArmor = skyrim_cast<TESObjectARMO*>(leftObj)) {
+                        leftCanBlock = leftArmor->IsShield();
+                    }
+                }
+                if (!leftCanBlock) return false;
+            }
         }
 
         return true;
@@ -186,44 +200,52 @@ namespace {
         return g_keyStates[modifierKey].load(std::memory_order_relaxed);
     }
 
-    bool HandleBlockEvent(ButtonEvent* button, uint32_t keyCode)
+    bool IsPowerAttackChordActive(uint32_t keyCode)
+    {
+        const auto check = g_powerAttackChordCheck;
+        return check && check(keyCode);
+    }
+
+    void HandleBlockEvent(ButtonEvent* button, uint32_t keyCode)
     {
         const uint32_t blockKey = g_altBlockKey.load();
-        if (blockKey == kKeyDisabled || keyCode != blockKey) return false;
-        const uint32_t modifier = g_blockModifier.load();
-        if (modifier != kModifierNone) {
-            if (button->IsDown()) {
-                g_blockComboActive = IsModifierHeld(modifier);
-            }
-            if (!g_blockComboActive) return false;
-            if (button->IsUp()) {
-                g_blockComboActive = false;
-            }
-        }
+        if (blockKey == kKeyDisabled || keyCode != blockKey) return;
 
         auto* player = PlayerCharacter::GetSingleton();
-        if (!player) return false;
+        if (!player) return;
 
         auto* actorState = player->AsActorState();
-        if (!actorState) return false;
+        if (!actorState) return;
 
-        if (!IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return false;
-
-        if (button->IsPressed()) {
-            actorState->actorState2.wantBlocking = 1;
-            bool isBlocking = false;
-            if (player->GetGraphVariableBool("IsBlocking", isBlocking) && !isBlocking) {
-                player->NotifyAnimationGraph("blockStart");
-            }
-        } else if (button->IsUp()) {
+        if (button->IsUp()) {
+            g_blockComboActive = false;
             actorState->actorState2.wantBlocking = 0;
             bool isBlocking = false;
             if (player->GetGraphVariableBool("IsBlocking", isBlocking) && isBlocking) {
                 player->NotifyAnimationGraph("blockStop");
             }
+            return;
         }
 
-        return true;
+        if (!button->IsPressed() || !g_pluginEnabled.load()) return;
+
+        const uint32_t modifier = g_blockModifier.load();
+        if (modifier != kModifierNone) {
+            if (button->IsDown()) {
+                g_blockComboActive = IsModifierHeld(modifier);
+            }
+            if (!g_blockComboActive) return;
+        }
+
+        if (!IsGameplayInputAllowed() || !IsPlayerInValidCombatState(player)) return;
+
+        if (actorState->GetAttackState() != ATTACK_STATE_ENUM::kNone) return;
+
+        actorState->actorState2.wantBlocking = 1;
+        bool isBlocking = false;
+        if (player->GetGraphVariableBool("IsBlocking", isBlocking) && !isBlocking) {
+            player->NotifyAnimationGraph("blockStart");
+        }
     }
 
     void HandleCaptureInput(uint32_t macroKey)
@@ -259,10 +281,14 @@ namespace {
                     HandleCaptureInput(macroKey);
                     button->GetRuntimeData().value = 0.0f;  // consume so it doesn't leak to game/menu
                 }
+                if (button->IsUp()) {
+                    HandleBlockEvent(button, macroKey);
+                }
                 continue;  // suppress gameplay handling while capturing
             }
 
-            if (g_pluginEnabled.load()) {
+            const bool suppressBlock = button->Value() != 0.0f && IsPowerAttackChordActive(macroKey);
+            if (!suppressBlock) {
                 HandleBlockEvent(button, macroKey);
             }
         }
@@ -673,6 +699,12 @@ SKSEPluginLoad(const LoadInterface* skse)
             SKSE::log::critical("SKSE Menu Framework not installed.");
             return;
         }
+
+        if (auto* powerAttackModule = GetModuleHandleA("SimplePowerAttack.dll")) {
+            g_powerAttackChordCheck = reinterpret_cast<PowerAttackChordCheck_t>(
+                GetProcAddress(powerAttackModule, "SimplePowerAttack_IsChordActive"));
+        }
+        SKSE::log::info("Power attack chord coordination {}", g_powerAttackChordCheck ? "active" : "unavailable");
 
         LoadConfig();
 
