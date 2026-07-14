@@ -57,7 +57,7 @@ namespace {
     constexpr uint32_t kGamepadLT            = 0x0009;
     constexpr uint32_t kGamepadRT            = 0x000A;
 
-    constexpr const char* kPrimaryConfigFileName = "SimplePowerAttack.ini";
+    constexpr const wchar_t* kPrimaryConfigFileName = L"SimplePowerAttack.ini";
 
     const TaskInterface* g_task = nullptr;
     BGSAction* g_rightPowerAttackAction = nullptr;
@@ -111,17 +111,19 @@ namespace {
     void TriggerLeftPowerAttack(PlayerCharacter* player);
     void TriggerDualPowerAttack(PlayerCharacter* player);
 
-    std::string GetPrimaryConfigPath()
+    std::filesystem::path GetPrimaryConfigPath()
     {
-        char modulePath[MAX_PATH]{};
-        const auto written = GetModuleFileNameA(reinterpret_cast<HMODULE>(&__ImageBase), modulePath, MAX_PATH);
-        if (written > 0) {
-            std::filesystem::path path(modulePath);
-            path.replace_filename(kPrimaryConfigFileName);
-            return path.string();
+        wchar_t exePath[MAX_PATH]{};
+        const auto written = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (written > 0 && written < MAX_PATH) {
+            std::filesystem::path path(exePath);
+            path.remove_filename();
+            path /= L"Data\\SKSE\\Plugins";
+            path /= kPrimaryConfigFileName;
+            return path;
         }
 
-        return std::string("Data\\SKSE\\Plugins\\") + kPrimaryConfigFileName;
+        return std::filesystem::path(L"Data\\SKSE\\Plugins") / kPrimaryConfigFileName;
     }
 
     uint32_t GamepadMaskToKeycode(uint32_t keyMask)
@@ -524,7 +526,7 @@ namespace {
         rightMod = SanitizeUnifiedModifier(rightMod);
         leftMod = SanitizeUnifiedModifier(leftMod);
         dualMod = SanitizeUnifiedModifier(dualMod);
-        const std::string savePath = GetPrimaryConfigPath();
+        const std::filesystem::path savePath = GetPrimaryConfigPath();
 
         g_ini.Reset();
         g_ini.SetBoolValue("General", "bEnabled", pluginEnabled);
@@ -538,8 +540,7 @@ namespace {
         g_ini.SetBoolValue("General", "bPowerAttackNoStamina", noStaminaPA);
 
         try {
-            std::filesystem::path savePathFs(savePath);
-            std::filesystem::create_directories(savePathFs.parent_path());
+            std::filesystem::create_directories(savePath.parent_path());
         } catch (const std::exception& e) {
             SKSE::log::error("Failed to create config directory: {}", e.what());
             g_ini.Reset();
@@ -550,12 +551,12 @@ namespace {
         g_ini.Reset();
 
         if (saveResult < 0) {
-            SKSE::log::error("Failed to save config to '{}'", savePath);
+            SKSE::log::error("Failed to save config to '{}'", savePath.string());
             return false;
         }
 
         SKSE::log::info("Saved config enabled={} right={} left={} dual={} rmod={} lmod={} dmod={} mco={} noStaminaPA={} to '{}'",
-            pluginEnabled, keyCode, leftKeyCode, dualKeyCode, rightMod, leftMod, dualMod, mcoMode, noStaminaPA, savePath);
+            pluginEnabled, keyCode, leftKeyCode, dualKeyCode, rightMod, leftMod, dualMod, mcoMode, noStaminaPA, savePath.string());
         return true;
     }
     const char* GetMacroKeyName(uint32_t code, bool isModifier)
@@ -853,11 +854,11 @@ namespace {
 
     void LoadConfig()
     {
-        const std::string path = GetPrimaryConfigPath();
+        const std::filesystem::path path = GetPrimaryConfigPath();
 
         const SI_Error result = g_ini.LoadFile(path.c_str());
         if (result < 0) {
-            SKSE::log::warn("Config not found at '{}', using defaults", path);
+            SKSE::log::warn("Config not found at '{}', using defaults", path.string());
             g_altPowerAttackKey = kDefaultAltPowerAttackKey;
             g_pendingAltPowerAttackKey = kDefaultAltPowerAttackKey;
             g_hasUnsavedKeyChange = false;
@@ -950,7 +951,7 @@ namespace {
 
         g_ini.Reset();
         SKSE::log::info("Loaded config enabled={} right={} left={} dual={} rmod={} lmod={} dmod={} mco={} noStaminaPA={} from '{}'",
-            parsedEnabled, parsedKey, parsedLeftKey, parsedDualKey, parsedRMod, parsedLMod, parsedDMod, parsedMco, parsedNoStamina, path);
+            parsedEnabled, parsedKey, parsedLeftKey, parsedDualKey, parsedRMod, parsedLMod, parsedDMod, parsedMco, parsedNoStamina, path.string());
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)

@@ -46,8 +46,8 @@ namespace {
     constexpr uint32_t kGamepadLT            = 0x0009;
     constexpr uint32_t kGamepadRT            = 0x000A;
 
-    constexpr const char* kPrimaryConfigFileName = "SimpleBlock.ini";
-    constexpr const char* kLegacyConfigFileName = "SimplePowerAttack.ini";  // migration source for old block binding
+    constexpr const wchar_t* kPrimaryConfigFileName = L"SimpleBlock.ini";
+    constexpr const wchar_t* kLegacyConfigFileName = L"SimplePowerAttack.ini";  // migration source for old block binding
 
     std::atomic<uint32_t> g_altBlockKey = kKeyDisabled;
     uint32_t g_pendingAltBlockKey = kKeyDisabled;
@@ -74,17 +74,19 @@ namespace {
 
     void LoadConfig();
 
-    std::string GetConfigPath(const char* fileName)
+    std::filesystem::path GetConfigPath(const wchar_t* fileName)
     {
-        char modulePath[MAX_PATH]{};
-        const auto written = GetModuleFileNameA(reinterpret_cast<HMODULE>(&__ImageBase), modulePath, MAX_PATH);
-        if (written > 0) {
-            std::filesystem::path path(modulePath);
-            path.replace_filename(fileName);
-            return path.string();
+        wchar_t exePath[MAX_PATH]{};
+        const auto written = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        if (written > 0 && written < MAX_PATH) {
+            std::filesystem::path path(exePath);
+            path.remove_filename();
+            path /= L"Data\\SKSE\\Plugins";
+            path /= fileName;
+            return path;
         }
 
-        return std::string("Data\\SKSE\\Plugins\\") + fileName;
+        return std::filesystem::path(L"Data\\SKSE\\Plugins") / fileName;
     }
 
     uint32_t GamepadMaskToKeycode(uint32_t keyMask)
@@ -313,7 +315,7 @@ namespace {
     {
         blockKeyCode = SanitizeKeyCode(blockKeyCode);
         blockMod = SanitizeUnifiedModifier(blockMod);
-        const std::string savePath = GetConfigPath(kPrimaryConfigFileName);
+        const std::filesystem::path savePath = GetConfigPath(kPrimaryConfigFileName);
 
         g_ini.Reset();
         g_ini.SetBoolValue("General", "bEnabled", pluginEnabled);
@@ -321,8 +323,7 @@ namespace {
         g_ini.SetLongValue("General", "iBlockMod", static_cast<long>(blockMod));
 
         try {
-            std::filesystem::path savePathFs(savePath);
-            std::filesystem::create_directories(savePathFs.parent_path());
+            std::filesystem::create_directories(savePath.parent_path());
         } catch (const std::exception& e) {
             SKSE::log::error("Failed to create config directory: {}", e.what());
             g_ini.Reset();
@@ -333,11 +334,11 @@ namespace {
         g_ini.Reset();
 
         if (saveResult < 0) {
-            SKSE::log::error("Failed to save config to '{}'", savePath);
+            SKSE::log::error("Failed to save config to '{}'", savePath.string());
             return false;
         }
 
-        SKSE::log::info("Saved config enabled={} block={} mod={} to '{}'", pluginEnabled, blockKeyCode, blockMod, savePath);
+        SKSE::log::info("Saved config enabled={} block={} mod={} to '{}'", pluginEnabled, blockKeyCode, blockMod, savePath.string());
         return true;
     }
 
@@ -567,18 +568,18 @@ namespace {
 
     void LoadConfig()
     {
-        const std::string path = GetConfigPath(kPrimaryConfigFileName);
+        const std::filesystem::path path = GetConfigPath(kPrimaryConfigFileName);
 
         const SI_Error result = g_ini.LoadFile(path.c_str());
         if (result < 0) {
             // One-time migration: pull the old block binding from SimplePowerAttack.ini if our INI is absent.
             uint32_t migratedKey = kKeyDisabled;
-            const std::string legacyPath = GetConfigPath(kLegacyConfigFileName);
+            const std::filesystem::path legacyPath = GetConfigPath(kLegacyConfigFileName);
             if (g_ini.LoadFile(legacyPath.c_str()) >= 0) {
                 const long rawLegacy = g_ini.GetLongValue("General", "iBlockKeycode", static_cast<long>(kKeyDisabled));
                 migratedKey = SanitizeKeyCode(static_cast<uint32_t>(rawLegacy < 0 ? 0 : rawLegacy));
             }
-            SKSE::log::warn("Config not found at '{}', using defaults (migrated block key={})", path, migratedKey);
+            SKSE::log::warn("Config not found at '{}', using defaults (migrated block key={})", path.string(), migratedKey);
             g_altBlockKey = migratedKey;
             g_pendingAltBlockKey = migratedKey;
             g_hasUnsavedBlockKeyChange = false;
@@ -612,7 +613,7 @@ namespace {
         g_hasUnsavedEnabledChange = false;
 
         g_ini.Reset();
-        SKSE::log::info("Loaded config enabled={} block={} mod={} from '{}'", parsedEnabled, parsedBlockKey, parsedBlockMod, path);
+        SKSE::log::info("Loaded config enabled={} block={} mod={} from '{}'", parsedEnabled, parsedBlockKey, parsedBlockMod, path.string());
     }
 
     bool __stdcall OnMenuFrameworkInput(RE::InputEvent* events)
